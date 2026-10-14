@@ -262,3 +262,11 @@ core, 23.7M cubes, 529k dots, strokes 54 s (5378 strokes, 36 % dots unclaimed). 
 `out/orc2400_toes.png` (= the patch result), `out/orc2400_nose.png` (face now has dot rows and strokes on mouth, nose,
 brow). App: samples setting gone, default 2400 cells, lines drawn on the surface by default, dots lifted half a cube.
 Next: split the triangle batches over the 32 cores (expect well under a minute), progress readout, grid cache on disk.
+
+**Multi-core stage one (2026-10-15, later).** `voxel.run_direct` splits the triangle batches over all cores
+(ProcessPoolExecutor; triangle arrays in shared memory, biggest batches first); hits are deduplicated per batch and
+merged with a stable sort by cube then triangle number. Tie rule: when a cube centre is equally near two triangles
+(nearest point on their shared edge) the lower triangle number wins, so the result does not depend on batch order
+(before, the pick was arbitrary: 0.4 % of orc cubes, 1 % of dots). `creases.fold_change` runs the 26 neighbour
+lookups in threads. Whole orc at 2400 cells on 32 cores: cubes 83 s (of which merging 6 s), fold change 18 s,
+find_dots 102 s total (was 505 s on one core). 1 and 8 cores give identical grids on the toe patch.

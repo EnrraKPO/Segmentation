@@ -9,7 +9,7 @@ Stage 2  strokes(res, W, L, K, align, agree, minlen, log) -> list of curves (mm)
    Thick stroke of half-width W through the dots: at each step the dots inside a window (L long, W wide) give the
    position (weighted centre) and the heading (the axis they are arranged along); stops when fewer than K dots lie
    ahead, on a sharp turn, on another stroke, or on its own tail."""
-import os, sys, numpy as np
+import os, sys, time, numpy as np
 from scipy.spatial import cKDTree
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__))); import voxel
 
@@ -17,15 +17,23 @@ OFFS = np.array([[i, j, l] for i in (-1, 0, 1) for j in (-1, 0, 1) for l in (-1,
 KB = 1 << 16
 
 
-def fold_change(idx, N, cut):
+def fold_change(idx, N, cut, log=None):
     """per cube: |shift ahead - shift behind| (deg) along the direction of the largest neighbour angle, and the crest flag"""
+    from concurrent.futures import ThreadPoolExecutor
     k = len(idx); key = (idx[:, 0]*KB+idx[:, 1])*KB+idx[:, 2]; srt = np.argsort(key, kind='stable'); skey = key[srt]
-    pmax = np.zeros(k); pdir = np.zeros(k, int); nb = np.full((k, 26), -1)
-    for q, o in enumerate(OFFS):
+
+    def look(o):
+        """neighbour index (or -1) and the arrow angle to it, for one of the 26 directions"""
         kk = ((idx[:, 0]+o[0])*KB+(idx[:, 1]+o[1]))*KB+(idx[:, 2]+o[2])
-        pos = np.minimum(np.searchsorted(skey, kk), k-1); j = np.where(skey[pos] == kk, srt[pos], -1); nb[:, q] = j; h = j >= 0
-        dot = (N[h]*N[j[h]]).sum(1); ang = np.degrees(np.arccos(np.clip(dot, -1, 1))); ang[dot < 0] = 0   # facing away = far side of a thin wall
-        upd = np.zeros(k, bool); upd[h] = ang > pmax[h]; pmax[upd] = ang[upd[h]]; pdir[upd] = q
+        pos = np.minimum(np.searchsorted(skey, kk), k-1); j = np.where(skey[pos] == kk, srt[pos], -1).astype(np.int32)
+        h = j >= 0; ang = np.zeros(k)
+        dot = (N[h]*N[j[h]]).sum(1); a = np.degrees(np.arccos(np.clip(dot, -1, 1))); a[dot < 0] = 0   # facing away = far side of a thin wall
+        ang[h] = a; return j, ang
+    with ThreadPoolExecutor(min(26, os.cpu_count() or 1)) as ex: res = list(ex.map(look, OFFS))
+    pmax = np.zeros(k); pdir = np.zeros(k, np.int32); nb = np.empty((k, 26), np.int32)
+    for q, (j, ang) in enumerate(res):
+        nb[:, q] = j; upd = ang > pmax; pmax[upd] = ang[upd]; pdir[upd] = q
+    del res
     opp = np.array([np.nonzero((OFFS == -o).all(1))[0][0] for o in OFFS])
     fwd = nb[np.arange(k), pdir]; bwd = nb[np.arange(k), opp[pdir]]; ok = (fwd >= 0) & (bwd >= 0)
     near = N-N[np.maximum(bwd, 0)]; far = N[np.maximum(fwd, 0)]-N
@@ -39,7 +47,8 @@ def find_dots(P, F, cells=1200, cut=17.0, spp=0.0, flat=True, log=None, height=N
     """spp=0: cubes straight from the triangles (voxel.run_direct, exact overlap test, facing read at the cube centre);
     spp>0: the old sample-point sprinkle with spp samples per cube edge (slow, memory-heavy; kept for comparison)"""
     r = voxel.run_direct(P, F, cells, log, height=height, flat=flat) if spp <= 0 else voxel.run(P, F, cells, 0.0, log, height=height, spp=spp, flat=flat)
-    change, crest = fold_change(r['idx'], r['N'], cut)
+    t0 = time.time(); change, crest = fold_change(r['idx'], r['N'], cut)
+    if log: log(f'fold change {time.time()-t0:.0f} s')
     if log: log(f'fold change per cube: p50 {np.percentile(change, 50):.1f} p90 {np.percentile(change, 90):.1f} p99 {np.percentile(change, 99):.1f} deg; dots (>= {cut} deg, crest): {int(crest.sum())}')
     return dict(idx=r['idx'], N=r['N'], lo=r['lo'], size=r['size'], turn=change, line=crest, d1=r['d1'])
 
