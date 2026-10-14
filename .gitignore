@@ -1,0 +1,18 @@
+# Python
+__pycache__/
+*.pyc
+
+# Experiment outputs (renders, saved curves/nodes)
+*.png
+*.npz
+
+# Models are large; keep them out of the repo
+*.stl
+*.obj
+*.ply
+
+# Editors / OS
+.vscode/
+.idea/
+Thumbs.db
+.DS_Store
