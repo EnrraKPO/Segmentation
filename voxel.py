@@ -163,18 +163,21 @@ def _direct_task(args):
     cid = imin_tri[:, None, :]+offs[None]                                     # (n, ncand, 3) cube indices
     Q = (lo+(cid+0.5)*size).reshape(-1, 3); rep = np.repeat(tri, ncand)
     inside = _tri_box_overlap(Q, A[rep], B[rep], C[rep], half); ntest = len(Q)
-    if not inside.any(): return None, None, None, None, ntest
+    if not inside.any(): return None, None, None, None, ntest, None
     Q = Q[inside]; rep = rep[inside]; cid = cid.reshape(-1, 3)[inside]
     X = _closest_on_triangles(Q, A[rep], B[rep], C[rep]); d = np.linalg.norm(X-Q, axis=1)
     key = (cid[:, 0]*KB+cid[:, 1])*KB+cid[:, 2]; nrm = None
-    o = np.lexsort((d, key)); first = np.r_[True, key[o][1:] != key[o][:-1]]; o = o[first]       # one hit per cube: the nearest
-    key, d, rep, X = key[o], d[o], rep[o], X[o]
+    # side score for ties (cube centre equally near two triangles = nearest point on their shared edge): the triangle
+    # whose facing points most directly at the cube centre is the side the cube is over; lower score = better
+    fnr = _W['FN'][rep]; side = (-np.abs((fnr*(Q-X)).sum(1))/np.maximum(d, 1e-12)).astype(np.float32)
+    o = np.lexsort((side, d, key)); first = np.r_[True, key[o][1:] != key[o][:-1]]; o = o[first]       # one hit per cube: the nearest
+    key, d, rep, X, side = key[o], d[o], rep[o], X[o], side[o]
     if not flat:
         Ai, Bi, Ci = A[rep], B[rep], C[rep]; v0 = Bi-Ai; v1 = Ci-Ai; v2 = X-Ai
         d00 = (v0*v0).sum(1); d01 = (v0*v1).sum(1); d11 = (v1*v1).sum(1); d20 = (v2*v0).sum(1); d21 = (v2*v1).sum(1)
         den = d00*d11-d01*d01; den = np.where(den != 0, den, 1); bv = (d11*d20-d01*d21)/den; bw = (d00*d21-d01*d20)/den; bu = 1-bv-bw
         nrm = (VN[F[rep, 0]]*bu[:, None]+VN[F[rep, 1]]*bv[:, None]+VN[F[rep, 2]]*bw[:, None]).astype(np.float32)
-    return key, d.astype(np.float32), rep.astype(np.int32), nrm, ntest
+    return key, d.astype(np.float32), rep.astype(np.int32), nrm, ntest, side
 
 
 def run_direct(P, F, cells=300, log=None, height=None, flat=True, batch=2_000_000, workers=None):
@@ -201,16 +204,16 @@ def run_direct(P, F, cells=300, log=None, height=None, flat=True, batch=2_000_00
             tri = grp[c0:c0+step]; tasks.append((tri, sp, imin[tri], flat))
     tasks.sort(key=lambda t: -len(t[0])*int(np.prod(t[1])))                     # biggest batches first: balanced finish
     workers = workers or os.cpu_count() or 1
-    keys, dists, fids, nrms = [], [], [], []; ntest = 0; done = 0; t0 = time.time(); nxt = 0.1
+    keys, dists, fids, nrms, sides = [], [], [], [], []; ntest = 0; done = 0; t0 = time.time(); nxt = 0.1
     def take(r):
         nonlocal ntest, done, nxt
-        key, d, rep, nrm, nt = r; ntest += nt; done += 1
-        if key is not None: keys.append(key); dists.append(d); fids.append(rep); nrms.append(nrm)
+        key, d, rep, nrm, nt, side = r; ntest += nt; done += 1
+        if key is not None: keys.append(key); dists.append(d); fids.append(rep); nrms.append(nrm); sides.append(side)
         if log and done >= nxt*len(tasks): log(f'  cubes: {100*done/len(tasks):.0f} % of triangle batches, {time.time()-t0:.0f} s'); nxt += 0.1
     if workers > 1 and len(tasks) > 1:
         from multiprocessing import shared_memory
         shms = []; spec = {}
-        for k, arr in dict(A=A, B=B, C=C, VN=VN, F=F).items():
+        for k, arr in dict(A=A, B=B, C=C, VN=VN, F=F, FN=fn).items():
             if arr is None: spec[k] = (None, None, None); continue
             arr = np.ascontiguousarray(arr); shm = shared_memory.SharedMemory(create=True, size=arr.nbytes); shms.append(shm)
             np.ndarray(arr.shape, dtype=arr.dtype, buffer=shm.buf)[:] = arr; spec[k] = (shm.name, arr.shape, arr.dtype)
@@ -220,13 +223,14 @@ def run_direct(P, F, cells=300, log=None, height=None, flat=True, batch=2_000_00
         finally:
             for shm in shms: shm.close(); shm.unlink()
     else:
-        _W.update(A=A, B=B, C=C, VN=VN, F=F, lo=lo, size=size)
+        _W.update(A=A, B=B, C=C, VN=VN, F=F, FN=fn, lo=lo, size=size)
         for t in tasks: take(_direct_task(t))
-    t1 = time.time(); key = np.concatenate(keys); dist = np.concatenate(dists); fid = np.concatenate(fids)
-    o = np.argsort(fid, kind='stable'); o = o[np.argsort(key[o], kind='stable')]; key, dist, fid = key[o], dist[o], fid[o]   # by cube, then by triangle number
+    t1 = time.time(); key = np.concatenate(keys); dist = np.concatenate(dists); fid = np.concatenate(fids); side = np.concatenate(sides)
+    o = np.argsort(fid, kind='stable'); o = o[np.argsort(side[o], kind='stable')]; o = o[np.argsort(key[o], kind='stable')]   # by cube, then best side, then triangle number
+    key, dist, fid = key[o], dist[o], fid[o]
     first = np.r_[True, key[1:] != key[:-1]]; grp = np.cumsum(first)-1                         # hits of one cube are now adjacent
     best = np.full(first.sum(), np.inf, np.float32); np.minimum.at(best, grp, dist)             # nearest hit per cube
-    pick = np.nonzero(dist == best[grp])[0]; pick = pick[np.r_[True, grp[pick][1:] != grp[pick][:-1]]]   # nearest; ties (centre nearest to a shared edge) -> lowest triangle number, so the choice does not depend on batch order
+    pick = np.nonzero(dist == best[grp])[0]; pick = pick[np.r_[True, grp[pick][1:] != grp[pick][:-1]]]   # nearest; ties (centre nearest to a shared edge) -> the triangle facing the cube centre most directly
     o = o[pick]; key, dist, fid = key[pick], dist[pick], fid[pick]
     if log: log(f'  cubes: merging {len(grp)/1e6:.0f}M hits, {time.time()-t1:.0f} s')
     first = np.ones(len(key), bool); uk = key; face = fid

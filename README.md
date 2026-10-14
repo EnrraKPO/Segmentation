@@ -270,3 +270,6 @@ merged with a stable sort by cube then triangle number. Tie rule: when a cube ce
 (before, the pick was arbitrary: 0.4 % of orc cubes, 1 % of dots). `creases.fold_change` runs the 26 neighbour
 lookups in threads. Whole orc at 2400 cells on 32 cores: cubes 83 s (of which merging 6 s), fold change 18 s,
 find_dots 102 s total (was 505 s on one core). 1 and 8 cores give identical grids on the toe patch.
+Tie rule changed (user: a random side is not acceptable): when a cube centre is equally near two triangles, the cube
+takes the triangle whose facing points most directly at the cube centre (the side the cube is over). Deterministic,
+1 and 8 cores identical; toe patch dots 3211 (was 3267 with the arbitrary pick); `out/s_side_nail.png` ring unchanged.
