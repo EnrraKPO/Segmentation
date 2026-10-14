@@ -1,0 +1,5 @@
+   snap: nodes sat 51 um (median) / 91 um (p90) off the surface
+out/orc.npz: trail  872 nodes, offset from darkest pixel: median -3325 um, spread 1611 um  (colour (0, 200, 255))
+   snap: nodes sat 53 um (median) / 99 um (p90) off the surface
+out/orc.npz: trail  185 nodes, offset from darkest pixel: median   -13 um, spread 3780 um  (colour (0, 200, 255))
+saved out/orc_s_pauldron.png

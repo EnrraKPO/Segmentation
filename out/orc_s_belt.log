@@ -1,0 +1,5 @@
+   snap: nodes sat 61 um (median) / 179 um (p90) off the surface
+out/orc.npz: trail  977 nodes, offset from darkest pixel: median +2231 um, spread 3699 um  (colour (0, 200, 255))
+   snap: nodes sat 42 um (median) / 322 um (p90) off the surface
+out/orc.npz: trail   49 nodes, offset from darkest pixel: median +1674 um, spread 2449 um  (colour (0, 200, 255))
+saved out/orc_s_belt.png

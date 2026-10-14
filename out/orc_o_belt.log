@@ -1,0 +1,7 @@
+out/orc.npz: trail  977 nodes, offset from darkest pixel: median -12525 um, spread 17481 um  (colour (0, 200, 255))
+out/orc.npz: trail  297 nodes, offset from darkest pixel: median +35843 um, spread  871 um  (colour (0, 200, 255))
+out/orc.npz: trail  519 nodes, offset from darkest pixel: median -4929 um, spread 8245 um  (colour (0, 200, 255))
+out/orc.npz: trail  359 nodes, offset from darkest pixel: median  -786 um, spread    0 um  (colour (0, 200, 255))
+out/orc.npz: trail  471 nodes, offset from darkest pixel: median +33761 um, spread    0 um  (colour (0, 200, 255))
+out/orc.npz: trail  282 nodes, offset from darkest pixel: median +5811 um, spread 15822 um  (colour (0, 200, 255))
+saved out/orc_o_belt.png

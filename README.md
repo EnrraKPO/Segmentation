@@ -90,3 +90,156 @@ chains whose nodes run parallel (directions agree) at a separation under the dir
 at which the tool already treats dots as one structure) are one trail; merge to their mean positions. The
 close-up render of pair 8/31 (`pair_zoom.png`) showed the dots but not the chain lines (drawn under the surface
 even when lifted); to fix before judging visually.
+
+## Session notes 2026-10-14: tracer, lean detour, and how to judge snapping
+
+Repo: https://github.com/EnrraKPO/Segmentation (account EnrraKPO, plain `git push` over HTTPS; no `gh`).
+Test model and view: `A1_HarleyQuinn_Leotard.stl` (Documents/Models/Dinamuuu3D), waist seam, focus (12,135,12), view `zy`.
+Outputs live in `out/` (ignored by git). Grids and fields are cached as `out/<prefix>_grid600.npz`, `out/<prefix>_lean*.npz`.
+
+**Where the line stage stands.** The dot-to-dot chase (`exp_chase.py` + `refine_chase.py`) reproduces the old numbers
+(1971 -> 805 chains, longest 251) but its chains zigzag: each node is a dot, each dot is a cube centre, so every node
+carries up to half a cube of grid jitter (heading change 21 deg per step). Replaced by a STEPPING tracer:
+
+- `trace.py` / `trace2.py`: from the strongest line cell, step one cell along the surface's own line direction
+  (cross(normal, d1) from `voxel.py`), balance the new node sideways to the turn-weighted centre of a strip across
+  the line, read the direction there, repeat. Stops when the turn fades, on a corner, or on another trail.
+  `trace2.py` adds gaussian strip weights, heading momentum 0.7 and a self-loop stop. Run as
+  `ALONG=3 STRIP=3.5 python trace2.py mesh out/prefix` (strip 3 cells long along the line, 3.5 wide): heading change
+  2 deg per step, wobble 0.05 cell. Any single row of cubes places the peak half a cube off at random; averaging
+  3 cells along the line is what removes it. Best result: `out/tr_a3s3.5.npz`.
+- `view_chains.py mesh chains.npz out [lift zooms]`: clean render, chains lifted off the surface, no dots.
+  **Do not judge snapping with a lift** (see below).
+
+**Lean detour (abandoned).** Theory: the light responds to the normal's tilt, not to curvature, so trace the
+"lean" of each cell's normal against its surroundings. Built in `trace_lean.py` (lean field at radius 4/8/12 cells,
+or against a gaussian-blurred body normal with `SMOOTH=<mm>`; seeds only at crest cells; `CLAIM` radius 2).
+It gives clean single trails per line, but measured against the render they sit 117-185 um from the dark line,
+worse than the curvature tracer. Reason: the seam is a step 0.4 mm deep and one cube wide; the lean's reference
+normal is tilted by the slope beyond the step, so the lean peaks on the plateau beside the step, not on it.
+
+**How to judge snapping (the important lesson).** `verdict.py mesh out.png chains.npz...` renders the shaded view,
+marks the darkest pixel per row in red, draws each trail in the SAME plotter and camera, and prints the median
+sideways offset in um (2.25 um/px at zoom 25). Two traps found today:
+1. Rendering a trail in its own plotter auto-fits the camera to the trail, so pixel columns do not match the mesh
+   render. Always add the mesh first, set the camera, then add the trail with `reset_camera=False`.
+2. Lifting the drawn line along the normal (0.06 mm in `view_chains.py`) moves it ~45 um sideways in the image where
+   the surface faces sideways. That made the curvature trail look clearly off the crease all evening.
+   With `LIFT=0 python verdict.py ...` the curvature trail is 37 um from the darkest pixel and ~35 um from the edge of
+   the dark band (a third of a cube), i.e. on the bright-to-dark shift. `out/verdict_lift0_crop.png` shows it.
+
+**Cross-section facts** (row 800 of the zoom-25 view): the plateau faces the camera; within one cube the normal
+swings to sideways (-z); the dark band is that sideways face, 70-90 um wide; curvature LINE cells sit in the last
+bright cube and the first sideways cube. `measure_offsets.py` compares 3D z of trail vs darkest pixel (geometry only;
+its pixel columns are invalid, see trap 1).
+
+**Open for tomorrow.**
+- Decide if a third of a cube is close enough. If not: denser grid (1000-1200 cells) with the same tracer, judged
+  with `verdict.py` at LIFT=0. Cubes finer than the triangles (median edge 72 um) are useless: the shading is flat
+  inside a triangle (fine grid at 2400 gave striped crest cells).
+- Fold `ALONG=3 STRIP=3.5` defaults into `trace2.py`; move the app (`app.py`, still on `lines.py`) onto it.
+- Junctions: trails stop when they run into another trail; nothing joins them yet.
+- `voxel.py` now takes `height=` (reference height for a band mesh) and packs indices with base 2^16.
+- Nothing from today is committed yet (`git status` lists: voxel.py, snap_chase.py, trace.py, trace2.py,
+  trace_lean.py, view_chains.py, measure_offsets.py, verdict.py).
+
+## Session notes 2026-10-15: second model (warrior orc)
+
+Test: `Documents/Models/Dinamuuu3D/warriororc/orc big.stl` (208 mm tall, 1.5 M faces, cell 0.348 mm at 600 cells).
+`ALONG=3 STRIP=3.5 python trace2.py "...orc big.stl" out/orc`: grid 43 s, 146k line cells, 2922 trails (894 with 20+
+nodes, longest 1079), 42% of line cells left unclaimed. Outputs `out/orc*.png`.
+
+New helpers: `overview.py mesh chains.npz out [min_nodes]` renders the whole model from four sides (first look at a new
+model). `cells_view.py` draws the raw line cells (dots, coloured by turn) plus every trail at a FOCUS, to diagnose a
+spot. `verdict.py` now takes `FOCUS=x,y,z VIEW=xz ZOOM=n` and scales um/px from the model's bounding diagonal.
+
+**Third measurement trap: at LIFT=0, trails on sharp convex edges are hidden INSIDE the mesh.** Nodes are balance
+points of cell centres, which sit a median 50 um (p90 100-300 um) off the surface; on a knife edge they fall inside the
+solid and the chord is occluded. The pauldron plate edge looked untraced; it was fully traced by the 872-node trail.
+Fix: `SNAP=1` in `verdict.py` / `cells_view.py` moves each node to the nearest surface point (+0.01 mm) and prints how
+far the nodes sat off the surface. Use SNAP=1, never a lift, to judge.
+
+**What the orc shows.** Plate edges, bracer rims, belt rings: trails sit on the bright-to-dark shift (pauldron edge
+coincides with the darkest-pixel line; bracer rim traced top and bottom of its wall). Sharp bevelled edges give 2-3
+parallel trails half a cell to 2 cells apart (the top crease, a duplicate, the foot crease): the "parallel lines" issue
+from Harley, more pronounced. Soft muscle folds and cloth folds are also traced (pectoral creases, skirt wrinkles):
+whether those are wanted is a design question. The darkest-pixel offset number is meaningless where several shaded
+features share a row; judge by eye at zoom 25 with SNAP=1.
+
+**Pair angles (later on 2026-10-15).** Conclusion of a long discussion: the per-cube "turn" (least-squares shape operator
+over 26 neighbours) is a smooth-bend measure and cannot see a sharp step; it smears a crease over ~3 cubes, which is
+the root of the defects (band of line cells 2-3 wide, duplicates, missed shallow creases, lines on soft forms). Replaced
+for a test by `pair.py`: per cube the largest angle to any neighbour's normal (neighbours facing away, dot<0, are
+the far side of a thin wall and are ignored), crest = at least as sharp as the cubes on either side along that
+neighbour direction, threshold 15 deg. Writes a grid npz with the same fields, so `trace2.py` runs on it unchanged:
+`python pair.py out/orc_grid600.npz out/orcp_grid600.npz 15; ALONG=3 STRIP=3.5 python trace2.py mesh out/orcp`.
+Result on the orc (`out/new_*.png` vs `out/orc_c_*.png`): hard edges become a single clean row of cells and the plate
+outlines run unbroken; the foot wrinkles (missed before) get lines; but MORE lines on soft forms (toe tops, forehead),
+4070 trails vs 2922. Reason: at 0.35 mm cubes a small soft bulge turns as much per cube as a wrinkle. The agreed next
+idea (user's): coarse pass generous, then a finer-cube pass in a band around the candidate lines, reading the pair
+angle at the pixel size the user judges at; soft bulges should fall away there. The "cubes finer than triangles are
+useless" claim from 2026-10-14 is withdrawn: the render shades smoothly inside triangles and the cubes read that same
+interpolated normal. Helpers: `pick.py` (pixel -> 3D point for a view), `graded_view.py` (all cubes coloured by a
+field), `mesh_profile.py` (true normal turn along a path on the mesh), `profile.py` (grid turn along d1).
+User's marked defects are in `in/detection_issues_1..3.png`.
+
+**Direction-aware test (end of 2026-10-15).** The pair angle measures only the AMOUNT of tilt per cube; a toe flank
+(steady tilt, 4-8 deg/cube at 0.087 mm) and a wrinkle (tilt one way then back) read the same. `shift.py` keeps the
+direction: along the across-feature direction it takes the arrow change on the near side and on the far side and
+stores |far - near| (how much the shift changes). Steady tilt -> ~0, wrinkle -> twice the tilt, step edge -> the step.
+On the fine toes patch (`patch_grid.py mesh out/toes 2400 228.2,99.7,4.8 16` -> 0.087 mm cubes over a 32 mm box,
+5 s): flank bands vanish, nail edges and clefts are a crisp single row, wrinkles appear at a 3 deg cut
+(`out/shift3_toes.png`), not at 6 (`out/shift_toes.png`); raw field `out/shift_toes_graded*.png`. Remaining: the
+threshold (3 vs 6 at this cube size), speckle around the nail grooves at 2-5 deg, and the WALK now fragments the
+single-row crest into many short trails (its strip/claim settings were tuned for the old blurred band). Pipeline for
+a spot: patch_grid.py -> shift.py -> trace2.py (with the cells arg) -> cells_view.py / graded_view.py.
+
+**Unblended facing test (2026-10-15, late).** `voxel.run(..., flat=True)` (env `FLAT=1` in patch_grid.py) gives each
+sample the facing of its own triangle (the print's surface), no corner blending; `SPP=8` reads the arrow within
+1/16 cube of the centre. On the fine toes patch with `shift.py` at 3 deg: the nail edges and the toe cleft are the
+crispest yet (one-cube-wide ring, `out/flat_toes_graded_min2.png`), but every triangle edge on the curved toes shows
+as a small fold (2-15 deg) and the walk drowns in them (2145 trails, `out/flat_toes.png`). Agreed truth: a line is a
+fold larger than the folds around it; that comparison is not implemented yet (shift.py only compares with the two
+adjacent cubes). Blended runs for comparison: `out/spp8_toes*.png`.
+At a 17 deg cut on the unblended fine field (`out/flat17_toes.png`, `out/flat17_wrinkle.png`): the cleanest result so
+far. Nail edges, toe cleft, knuckle folds and the strap edge come out as single clean rows with no flank clutter; the
+wrinkles appear only along their strongest stretches (their fold runs 18-22 deg at the peak and dips under 17
+elsewhere). Measured on this patch: nail edges ~40 deg, wrinkles 18-22, toe flanks 8-15, flat skin 2-5. The walk still
+breaks the single-row crest into pieces (big toe nail ring is dots on one side, trail on the other).
+
+**Walk experiments on the 17-deg unblended toes patch (2026-10-15, last).** `MOM` (heading memory) is now an env var;
+MOM=0 changed nothing (the worm was not the heading memory). `out/wire_nail.png` shows the line cubes form a band 1-2
+cubes wide (an edge crossing the grid diagonally lights two cubes) and the trail wobbles by ~1 cube inside it; the
+triangles are not the cause. Bug fixed: `local()` gathered cubes within radius STRIP, so ALONG > STRIP was ignored; now
+radius = max(STRIP, ALONG). `SIGMA` is an env var. Runs `out/w_t{thick}_s{stretch}_*.png` (STRIP=SIGMA=thick,
+ALONG=stretch, MOM=0): stretch 12 smooths the nail ring into a clean curve (the user's "thick line through all the
+dots" idea works), but two side effects: trails overrun past the end of the dots (the end-of-line test takes the max
+turn anywhere in the long strip), and sparse weak dots seed junk hairpin trails. Both are stop/seed rules, not the
+balancing.
+Thick line (user's idea): STRIP=SIGMA=CLAIM=12, ALONG=12, MOM=0 (`CLAIM` now env; the self-collision rule ignores the
+last 2*CLAIM nodes, otherwise thick lines stop at once). `out/w_t12_s12_nail.png`: the nail ring is one smooth curve
+through the middle of the dots, duplicates swallowed, hairpins gone bar one small spike. Best walk result so far.
+
+**trace3.py, the thick-stroke walk (end of 2026-10-15).** Built from the user's sketch `in/thick_lines.png`: one smooth
+stroke of half-width W covering each cluster of dots. At each step the stroke takes the dots inside a window (L long,
+W wide), moves sideways to their weighted centre and takes the direction they are ARRANGED along (principal axis) as
+its heading; no per-cube direction is used. Window must be ALIGN times longer than wide (else no fit), stops when
+fewer than K dots lie ahead, on a sharp turn, on another stroke, or on its own tail (closed loop; ignores the last 2L
+nodes). `W=4 L=12 K=3 ALIGN=3 python trace3.py out/toesf17_grid2400.npz out/s_w4.npz`: `out/s_w4_nail.png` matches
+the sketch (ring = one smooth stroke, the sparse outer column = one smooth stroke, no spikes); `out/s_w4_toes.png`:
+nail rings on three toes, the cleft; wrinkles mostly not covered (dots too sparse for K=3 within W=4 at the 17-deg
+cut). Small overlap where the ring closes on itself.
+
+**Whole orc with the new pipeline (2026-10-15).** `FLAT=1 SPP=4 patch_grid.py orc out/orcfull 1200 165,160,104 1000`
+(0.174 mm cubes, 5.6 M surface cubes, 200 M samples, 316 s) -> `shift.py 17` (249 k dots) -> `trace3.py W=4 L=12 K=3`
+(3210 strokes, 48 % of dots unclaimed). Renders `out/orcfull_ov_*.png`, `out/full_{toes,ring,nose,arm}.png`. Clean:
+no lines on muscles or soft forms; plate edges, straps, nail rings, cleft are smooth strokes. Incomplete: many creases
+only partly covered (gaps where the dot row thins at this cube size), the face nearly empty except nostrils and lips.
+A whole-model grid at the toes' 0.087 mm would be ~20 M cubes / 800 M samples: too much memory in one go; the
+two-pass idea (coarse candidates -> fine patches) is the way to get fine cubes everywhere.
+
+**Harley leotard with the new pipeline.** `FLAT=1 SPP=4 patch_grid.py leotard out/hqfull 1300 12,135,12 1000`
+(0.050 mm cubes, 3.3 M cubes, 195 s) -> `shift.py 17` (41 k dots) -> `trace3.py W=4 L=12 K=3`: 121 strokes, 91 % of
+dots claimed. `out/hq_waist.png` (zoom 25, SNAP): the waist seam is ONE smooth stroke sitting exactly on the
+bright-to-dark edge, the user's standard from 2026-10-14, with no lift and no offset. `out/hq_wide.png`,
+`out/hqfull_ov_*.png` for coverage.

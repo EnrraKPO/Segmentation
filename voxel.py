@@ -14,7 +14,8 @@ from scipy.spatial import cKDTree
 OFFS = np.array([[i, j, k] for i in (-1, 0, 1) for j in (-1, 0, 1) for k in (-1, 0, 1) if (i, j, k) != (0, 0, 0)])
 
 
-def _cell_samples(P, F, VN, size, spp):
+def _cell_samples(P, F, VN, size, spp, flat=False):
+    """flat=True: each sample carries the facing of its own triangle (the print's surface), no corner blending"""
     """sample points on every face densely enough that every cell the surface passes through gets hit"""
     A, B, C = P[F[:, 0]], P[F[:, 1]], P[F[:, 2]]
     longest = np.maximum.reduce([np.linalg.norm(B-A, axis=1), np.linalg.norm(C-B, axis=1), np.linalg.norm(A-C, axis=1)])
@@ -25,20 +26,31 @@ def _cell_samples(P, F, VN, size, spp):
         u = np.arange(k)+0.5
         bu, bv = np.meshgrid(u, u); m = (bu+bv) < k; bu, bv = bu[m]/k, bv[m]/k                # points in the triangle
         S = A[sel][:, None]+(B[sel]-A[sel])[:, None]*bu[None, :, None]+(C[sel]-A[sel])[:, None]*bv[None, :, None]
-        Ns = VN[F[sel, 0]][:, None]*(1-bu-bv)[None, :, None]+VN[F[sel, 1]][:, None]*bu[None, :, None]+VN[F[sel, 2]][:, None]*bv[None, :, None]
+        if flat:
+            fn = np.cross(B[sel]-A[sel], C[sel]-A[sel]); fn /= np.linalg.norm(fn, axis=1, keepdims=True)+1e-12
+            Ns = np.repeat(fn[:, None, :], len(bu), 1)
+        else:
+            Ns = VN[F[sel, 0]][:, None]*(1-bu-bv)[None, :, None]+VN[F[sel, 1]][:, None]*bu[None, :, None]+VN[F[sel, 2]][:, None]*bv[None, :, None]
         pts.append(S.reshape(-1, 3)); nrm.append(Ns.reshape(-1, 3)); fid.append(np.repeat(sel, len(bu)))
     return np.vstack(pts), np.vstack(nrm), np.concatenate(fid)
 
 
-def run(P, F, cells=300, sensitivity=10.0, log=None):
-    lo = P.min(0); ext = P.max(0)-lo; size = ext.max()/cells
+KB = 1 << 16   # index packing base (cells per axis must stay below this)
+
+
+def run(P, F, cells=300, sensitivity=10.0, log=None, height=None, spp=2.0, flat=False):
+    """spp: sample points per cube edge on each triangle; the cube reads its arrow from the sample nearest its centre,
+    so higher spp reads closer to the centre (error ~ 1/(2 spp) cube)"""
+    """height: reference model height (mm) for the cell size and the turn scale; default the mesh's own extent, so a
+    band cut out of a model can be gridded at the model's density by passing the full model height"""
+    lo = P.min(0); ext = P.max(0)-lo; height = ext.max() if height is None else height; size = height/cells
     import trimesh
     VN = trimesh.Trimesh(P, F, process=False).vertex_normals
-    pts, nrm, fid = _cell_samples(P, F, VN, size, 2.0)
+    pts, nrm, fid = _cell_samples(P, F, VN, size, spp, flat)
     ijk = np.floor((pts-lo)/size).astype(np.int64)
-    key = (ijk[:, 0]*4096+ijk[:, 1])*4096+ijk[:, 2]
+    key = (ijk[:, 0]*KB+ijk[:, 1])*KB+ijk[:, 2]
     uk, inv = np.unique(key, return_inverse=True); k = len(uk)
-    idx = np.stack([uk // (4096*4096), (uk // 4096) % 4096, uk % 4096], 1)
+    idx = np.stack([uk // (KB*KB), (uk // KB) % KB, uk % KB], 1)
     # direction per cell = the interpolated surface direction at the surface point nearest the cell centre (a texel)
     centre = lo+(idx[inv]+0.5)*size; dc = np.linalg.norm(pts-centre, axis=1)
     order = np.lexsort((dc, inv)); first = np.r_[True, inv[order][1:] != inv[order][:-1]]; pick = order[first]
@@ -49,7 +61,7 @@ def run(P, F, cells=300, sensitivity=10.0, log=None):
     lut = dict(zip(uk.tolist(), range(k)))
     nb = np.full((k, 26), -1, np.int64)
     for q, o in enumerate(OFFS):
-        kk = ((idx[:, 0]+o[0])*4096+(idx[:, 1]+o[1]))*4096+(idx[:, 2]+o[2])
+        kk = ((idx[:, 0]+o[0])*KB+(idx[:, 1]+o[1]))*KB+(idx[:, 2]+o[2])
         nb[:, q] = [lut.get(int(x), -1) for x in kk]
     has = nb >= 0
     # turn of the direction across the whole neighbourhood at once: least-squares fit of dN = S . dx over all present
@@ -80,7 +92,7 @@ def run(P, F, cells=300, sensitivity=10.0, log=None):
     # crest: the turn must peak across d1 (nearest cells along +-d1)
     def along(sign):
         step = np.rint(sign*d1).astype(int)
-        kk = ((idx[:, 0]+step[:, 0])*4096+(idx[:, 1]+step[:, 1]))*4096+(idx[:, 2]+step[:, 2])
+        kk = ((idx[:, 0]+step[:, 0])*KB+(idx[:, 1]+step[:, 1]))*KB+(idx[:, 2]+step[:, 2])
         j = np.array([lut.get(int(x), -1) for x in kk]); return np.where(j >= 0, turn[np.maximum(j, 0)], 0.0)
     tp, tm = along(1.0), along(-1.0)
     line = (turn >= sensitivity) & (turn >= tp) & (turn > tm)

@@ -1,0 +1,3 @@
+out/orc.npz: trail 1079 nodes, offset from darkest pixel: median +1198 um, spread 1206 um  (colour (0, 200, 255))
+out/orc.npz: trail   60 nodes, offset from darkest pixel: median  -123 um, spread   53 um  (colour (0, 200, 255))
+saved out/orc_v_bracer.png

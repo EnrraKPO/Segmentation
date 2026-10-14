@@ -1,0 +1,3 @@
+out/orc.npz: trail  872 nodes, offset from darkest pixel: median -3225 um, spread 1629 um  (colour (0, 200, 255))
+out/orc.npz: trail  185 nodes, offset from darkest pixel: median   -34 um, spread 2625 um  (colour (0, 200, 255))
+saved out/orc_v_pauldron.png

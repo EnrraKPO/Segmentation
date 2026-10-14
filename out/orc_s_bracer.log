@@ -1,0 +1,6 @@
+   snap: nodes sat 50 um (median) / 122 um (p90) off the surface
+out/orc.npz: trail 1079 nodes, offset from darkest pixel: median +1271 um, spread 1381 um  (colour (0, 200, 255))
+   snap: nodes sat 54 um (median) / 168 um (p90) off the surface
+   snap: nodes sat 54 um (median) / 102 um (p90) off the surface
+out/orc.npz: trail   60 nodes, offset from darkest pixel: median   +15 um, spread 1108 um  (colour (0, 200, 255))
+saved out/orc_s_bracer.png
