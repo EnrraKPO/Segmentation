@@ -1,6 +1,6 @@
 """Segmentation tool. Two stages, each run on its own and kept:
   1. Find dots   : cubes over the surface, each reading its own triangle's facing; a dot where the facing shift
-                   changes sharply from one cube to the next (creases.find_dots). Parameters: cells, cut.
+                   changes sharply from one cube to the next (creases.find_dots). Parameters: cube size (mm), cut.
   2. Build lines : one smooth thick stroke through each run of dots (creases.strokes). Parameters: thickness, stretch.
 Run: python app.py (from this folder)."""
 import os, sys, time, traceback
@@ -27,7 +27,7 @@ class Worker(QtCore.QThread):
 
 
 TIPS = dict(
-    cells="How many cubes span the model's height. The cube should be smaller than the model's triangles. 2400 on a 200 mm model is 0.087 mm; the cube count grows with the square of this number.",
+    cells="Edge of the cubes laid over the surface, in mm. Should be a few times smaller than the model's triangles but not far below them (orc: 0.41 mm triangles, 0.087 mm cubes; leotard: 0.072 mm triangles, 0.050 mm cubes). Halving it gives four times the cubes and the time.",
     cut="How much the facing shift must change from one cube to the next for the cube to be a dot. Measured on the orc: plate edges ~80, nail edges ~40, skin wrinkles 18-22, soft toe flanks 8-15, flat skin 2-5. 17 keeps creases and drops soft forms.",
     flat="On: the cube reads the facing of the flat triangle under it, the surface the print has. Off: the render's blended facing, which spreads every fold over the neighbouring triangles and hides faint creases.",
     W="Half the thickness of the stroke laid over the dots. Dots within this distance sideways belong to the stroke. 4 cubes swallows the one-or-two-cube band a crease makes; larger merges neighbouring parallel creases into one.",
@@ -57,7 +57,7 @@ class App(QtWidgets.QMainWindow):
             widget.setToolTip(tip); form.addRow(label, widget); form.labelForField(widget).setToolTip(tip)
 
         g1 = QtWidgets.QGroupBox('1. Find dots'); f1 = QtWidgets.QFormLayout(g1)
-        self.sp_cells = spin(2400, 100, 6000, 100); row(f1, 'Cells per model height', self.sp_cells, TIPS['cells'])
+        self.sp_cube = spin(0.087, 0.01, 5, 0.01, 3); row(f1, 'Cube size (mm)', self.sp_cube, TIPS['cells'])
         self.sp_cut = spin(17, 1, 90, 1); row(f1, 'Cut (deg)', self.sp_cut, TIPS['cut'])
         self.chk_flat = QtWidgets.QCheckBox("Read each triangle's own facing (no corner blending)"); self.chk_flat.setChecked(True); self.chk_flat.setToolTip(TIPS['flat']); f1.addRow(self.chk_flat)
         self.btn_dots = QtWidgets.QPushButton('Find dots'); self.btn_dots.clicked.connect(self.find_dots); self.btn_dots.setEnabled(False); f1.addRow(self.btn_dots)
@@ -91,7 +91,8 @@ class App(QtWidgets.QMainWindow):
         except Exception as ex: QtWidgets.QMessageBox.critical(self, 'Load failed', str(ex)); return
         self.path = path; self.lbl_file.setText(os.path.basename(path)); self.res = self.curves = None; self.mesh_t = None; self.btn_save.setEnabled(False)
         h = float((self.P.max(0)-self.P.min(0)).max())
-        self.logmsg(f'loaded {os.path.basename(path)}: {len(self.F)} faces, height {h:.1f} mm, cube at {int(self.sp_cells.value())} cells = {h/self.sp_cells.value():.3f} mm')
+        e = np.linalg.norm(self.P[self.F[:, 1]]-self.P[self.F[:, 0]], axis=1)
+        self.logmsg(f'loaded {os.path.basename(path)}: {len(self.F)} faces, height {h:.1f} mm, typical triangle edge {np.median(e):.3f} mm')
         self.busy(False); self.redraw()
 
     def _start(self, fn, on_done):
@@ -99,9 +100,10 @@ class App(QtWidgets.QMainWindow):
     def failed(self, msg): self.logmsg(msg); self.busy(False)
 
     def find_dots(self):
-        cells, cut, flat = int(self.sp_cells.value()), self.sp_cut.value(), self.chk_flat.isChecked()
-        self.logmsg(f'--- find dots: cells={cells}, cut={cut}, flat={flat}'); t0 = time.time()
-        self._start(lambda log: creases.find_dots(self.P, self.F, cells, cut, 0.0, flat, log), lambda r: self._dots_done(r, t0))
+        size, cut, flat = self.sp_cube.value(), self.sp_cut.value(), self.chk_flat.isChecked()
+        h = float((self.P.max(0)-self.P.min(0)).max()); cells = max(1, int(round(h/size)))
+        self.logmsg(f'--- find dots: cube={size} mm ({cells} cells over {h:.1f} mm), cut={cut}, flat={flat}'); t0 = time.time()
+        self._start(lambda log: creases.find_dots(self.P, self.F, cells, cut, 0.0, flat, log, height=h), lambda r: self._dots_done(r, t0))
     def _dots_done(self, r, t0):
         self.res = r; self.curves = None; self.logmsg(f'dots done in {time.time()-t0:.1f} s'); self.busy(False); self.redraw()
 
@@ -137,7 +139,7 @@ class App(QtWidgets.QMainWindow):
     def save(self):
         if not self.curves: return
         out = os.path.splitext(self.path)[0]+'_lines.npz'
-        prm = dict(cells=int(self.sp_cells.value()), cut=self.sp_cut.value(), flat=self.chk_flat.isChecked(), **self.stroke_params())
+        prm = dict(cube_mm=self.sp_cube.value(), cut=self.sp_cut.value(), flat=self.chk_flat.isChecked(), **self.stroke_params())
         np.savez(out, n=np.array([len(c) for c in self.curves]), pts=np.vstack(self.curves), params=str(prm)); self.logmsg(f'saved {out}')
 
 
