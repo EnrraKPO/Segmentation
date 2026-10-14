@@ -243,3 +243,10 @@ two-pass idea (coarse candidates -> fine patches) is the way to get fine cubes e
 dots claimed. `out/hq_waist.png` (zoom 25, SNAP): the waist seam is ONE smooth stroke sitting exactly on the
 bright-to-dark edge, the user's standard from 2026-10-14, with no lift and no offset. `out/hq_wide.png`,
 `out/hqfull_ov_*.png` for coverage.
+
+**App integrated (2026-10-15).** `creases.py` holds the pipeline as two functions, `find_dots` (voxel.run flat +
+fold change + crest) and `strokes` (thick stroke through the dots); `app.py` now runs these two stages with the
+parameters cells / cut / samples / flat and half-width / stretch / min dots / alignment / max turn / min length,
+and a 'draw lines on the surface' option (the SNAP of the diagnostic views). The old lines.py stage and Refine are
+gone from the app (lines.py stays in the repo). CLI for a whole model: `python creases.py mesh out.npz [cells cut W]`.
+Checked offscreen on the toes patch: same strokes as trace3.py.
