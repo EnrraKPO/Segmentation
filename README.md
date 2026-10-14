@@ -250,3 +250,15 @@ parameters cells / cut / samples / flat and half-width / stretch / min dots / al
 and a 'draw lines on the surface' option (the SNAP of the diagnostic views). The old lines.py stage and Refine are
 gone from the app (lines.py stays in the repo). CLI for a whole model: `python creases.py mesh out.npz [cells cut W]`.
 Checked offscreen on the toes patch: same strokes as trace3.py.
+
+**2026-10-15, later. Stage one rebuilt: cubes straight from the triangles (`voxel.run_direct`).** The sample-point
+sprinkle (`voxel.run`, 200M points for the orc at 1200 cells, memory-bound) is replaced: for every triangle, each cube
+in the box its corners span is tested exactly for overlap (separating axes); a cube overlapped by several triangles
+keeps the one whose nearest point is closest to the cube centre and reads its facing there. Memory stays small whatever
+the cube size. Toe patch at 2400: 2.3 s (vs minutes); the cube shell contains every sampled cube plus 2 % corner clips;
+dots 3267 vs 3210; `out/s_direct_toes.png` = `out/s_w4_toes.png`. `creases.fold_change` neighbour lookup vectorised
+(searchsorted; the dict loop would have taken >10 min on 24M cubes). Whole orc at 2400 cells (0.087 mm): 505 s on one
+core, 23.7M cubes, 529k dots, strokes 54 s (5378 strokes, 36 % dots unclaimed). `out/orc2400_ov_*.png`,
+`out/orc2400_toes.png` (= the patch result), `out/orc2400_nose.png` (face now has dot rows and strokes on mouth, nose,
+brow). App: samples setting gone, default 2400 cells, lines drawn on the surface by default, dots lifted half a cube.
+Next: split the triangle batches over the 32 cores (expect well under a minute), progress readout, grid cache on disk.

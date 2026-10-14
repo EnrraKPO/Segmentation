@@ -1,0 +1,6 @@
+grid 2400 cells/height, cell 0.087 mm: 23685546 surface cells, 241M cube-triangle tests (direct)
+fold change per cube: p50 0.4 p90 6.1 p99 41.0 deg; dots (>= 17.0 deg, crest): 528653
+find_dots 505 s
+strokes 5378, nodes 271247, dots unclaimed 190891 of 528653
+strokes 54 s
+saved

@@ -1,6 +1,6 @@
 """Segmentation tool. Two stages, each run on its own and kept:
   1. Find dots   : cubes over the surface, each reading its own triangle's facing; a dot where the facing shift
-                   changes sharply from one cube to the next (creases.find_dots). Parameters: cells, cut, samples.
+                   changes sharply from one cube to the next (creases.find_dots). Parameters: cells, cut.
   2. Build lines : one smooth thick stroke through each run of dots (creases.strokes). Parameters: thickness, stretch.
 Run: python app.py (from this folder)."""
 import os, sys, time, traceback
@@ -27,9 +27,8 @@ class Worker(QtCore.QThread):
 
 
 TIPS = dict(
-    cells="How many cubes span the model's height. The cube should be smaller than the model's triangles. 1200 on a 200 mm model is 0.17 mm (about 5 min on 1.5M faces); the cube count grows with the square, memory too.",
+    cells="How many cubes span the model's height. The cube should be smaller than the model's triangles. 2400 on a 200 mm model is 0.087 mm; the cube count grows with the square of this number.",
     cut="How much the facing shift must change from one cube to the next for the cube to be a dot. Measured on the orc: plate edges ~80, nail edges ~40, skin wrinkles 18-22, soft toe flanks 8-15, flat skin 2-5. 17 keeps creases and drops soft forms.",
-    spp="How densely each triangle is sampled. The cube reads its arrow from the sample nearest its centre, so more samples read closer to the centre (error about 1/(2 x samples) of a cube). 4 is fine; 8 costs 4x the time.",
     flat="On: the cube reads the facing of the flat triangle under it, the surface the print has. Off: the render's blended facing, which spreads every fold over the neighbouring triangles and hides faint creases.",
     W="Half the thickness of the stroke laid over the dots. Dots within this distance sideways belong to the stroke. 4 cubes swallows the one-or-two-cube band a crease makes; larger merges neighbouring parallel creases into one.",
     L="How far ahead and behind the stroke looks when deciding its position and heading. Longer = smoother line, but a long straight stretch cuts corners on tight curves. 12 worked on nail rings and seams.",
@@ -58,9 +57,8 @@ class App(QtWidgets.QMainWindow):
             widget.setToolTip(tip); form.addRow(label, widget); form.labelForField(widget).setToolTip(tip)
 
         g1 = QtWidgets.QGroupBox('1. Find dots'); f1 = QtWidgets.QFormLayout(g1)
-        self.sp_cells = spin(1200, 100, 4000, 100); row(f1, 'Cells per model height', self.sp_cells, TIPS['cells'])
+        self.sp_cells = spin(2400, 100, 6000, 100); row(f1, 'Cells per model height', self.sp_cells, TIPS['cells'])
         self.sp_cut = spin(17, 1, 90, 1); row(f1, 'Cut (deg)', self.sp_cut, TIPS['cut'])
-        self.sp_spp = spin(4, 1, 16, 1); row(f1, 'Samples per cube edge', self.sp_spp, TIPS['spp'])
         self.chk_flat = QtWidgets.QCheckBox("Read each triangle's own facing (no corner blending)"); self.chk_flat.setChecked(True); self.chk_flat.setToolTip(TIPS['flat']); f1.addRow(self.chk_flat)
         self.btn_dots = QtWidgets.QPushButton('Find dots'); self.btn_dots.clicked.connect(self.find_dots); self.btn_dots.setEnabled(False); f1.addRow(self.btn_dots)
         side.addWidget(g1)
@@ -77,7 +75,7 @@ class App(QtWidgets.QMainWindow):
 
         self.chk_dots = QtWidgets.QCheckBox('Show dots'); self.chk_dots.setChecked(True); self.chk_dots.stateChanged.connect(self.redraw); side.addWidget(self.chk_dots)
         self.chk_curves = QtWidgets.QCheckBox('Show lines'); self.chk_curves.setChecked(True); self.chk_curves.stateChanged.connect(self.redraw); side.addWidget(self.chk_curves)
-        self.chk_snap = QtWidgets.QCheckBox('Draw lines on the surface (slower)'); self.chk_snap.setChecked(False); self.chk_snap.setToolTip(TIPS['snap']); self.chk_snap.stateChanged.connect(self.redraw); side.addWidget(self.chk_snap)
+        self.chk_snap = QtWidgets.QCheckBox('Draw lines on the surface (a few seconds)'); self.chk_snap.setChecked(True); self.chk_snap.setToolTip(TIPS['snap']); self.chk_snap.stateChanged.connect(self.redraw); side.addWidget(self.chk_snap)
         self.btn_save = QtWidgets.QPushButton('Save lines…'); self.btn_save.clicked.connect(self.save); self.btn_save.setEnabled(False); side.addWidget(self.btn_save)
         self.txt = QtWidgets.QPlainTextEdit(); self.txt.setReadOnly(True); self.txt.setMaximumWidth(380); side.addWidget(self.txt, 1)
         self.plotter.set_background('white'); self.plotter.add_axes()
@@ -101,9 +99,9 @@ class App(QtWidgets.QMainWindow):
     def failed(self, msg): self.logmsg(msg); self.busy(False)
 
     def find_dots(self):
-        cells, cut, spp, flat = int(self.sp_cells.value()), self.sp_cut.value(), self.sp_spp.value(), self.chk_flat.isChecked()
-        self.logmsg(f'--- find dots: cells={cells}, cut={cut}, samples={spp}, flat={flat}'); t0 = time.time()
-        self._start(lambda log: creases.find_dots(self.P, self.F, cells, cut, spp, flat, log), lambda r: self._dots_done(r, t0))
+        cells, cut, flat = int(self.sp_cells.value()), self.sp_cut.value(), self.chk_flat.isChecked()
+        self.logmsg(f'--- find dots: cells={cells}, cut={cut}, flat={flat}'); t0 = time.time()
+        self._start(lambda log: creases.find_dots(self.P, self.F, cells, cut, 0.0, flat, log), lambda r: self._dots_done(r, t0))
     def _dots_done(self, r, t0):
         self.res = r; self.curves = None; self.logmsg(f'dots done in {time.time()-t0:.1f} s'); self.busy(False); self.redraw()
 
@@ -123,7 +121,8 @@ class App(QtWidgets.QMainWindow):
         self.plotter.add_mesh(mesh, color='lightgrey', smooth_shading=True)
         if self.res is not None and self.chk_dots.isChecked():
             C = self.res['lo']+(self.res['idx'][self.res['line']]+0.5)*self.res['size']
-            self.plotter.add_points(C, color='red', point_size=3, render_points_as_spheres=False)
+            C = C+0.5*self.res['size']*self.res['N'][self.res['line']]   # half a cube out along the facing, so dots on convex edges are not buried
+            self.plotter.add_points(C, color='red', point_size=5, render_points_as_spheres=True)
         if self.curves and self.chk_curves.isChecked():
             pts = np.vstack(self.curves)
             if self.chk_snap.isChecked():
@@ -138,7 +137,7 @@ class App(QtWidgets.QMainWindow):
     def save(self):
         if not self.curves: return
         out = os.path.splitext(self.path)[0]+'_lines.npz'
-        prm = dict(cells=int(self.sp_cells.value()), cut=self.sp_cut.value(), samples=self.sp_spp.value(), flat=self.chk_flat.isChecked(), **self.stroke_params())
+        prm = dict(cells=int(self.sp_cells.value()), cut=self.sp_cut.value(), flat=self.chk_flat.isChecked(), **self.stroke_params())
         np.savez(out, n=np.array([len(c) for c in self.curves]), pts=np.vstack(self.curves), params=str(prm)); self.logmsg(f'saved {out}')
 
 

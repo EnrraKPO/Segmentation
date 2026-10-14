@@ -1,8 +1,8 @@
 """The crease pipeline as functions (the CLI scripts shift.py / trace3.py do the same step by step).
 
 Stage 1  find_dots(P, F, cells, cut, spp, flat, log) -> res
-   Cubes over the surface (voxel.run); each cube's arrow is the facing of its own triangle (flat=True, the print's
-   surface) read at the sample nearest the cube centre (spp samples per cube edge). Fold change per cube: along the
+   Cubes over the surface (voxel.run_direct: every cube a triangle passes through, exact test); each cube's arrow is
+   the facing of its own triangle (flat=True, the print's surface), the triangle nearest the cube centre. Fold change per cube: along the
    neighbour direction with the largest arrow angle, |shift ahead - shift behind| in degrees. A cube is a dot when
    that change is >= cut and not smaller than the cubes behind/ahead.
 Stage 2  strokes(res, W, L, K, align, agree, minlen, log) -> list of curves (mm)
@@ -19,11 +19,11 @@ KB = 1 << 16
 
 def fold_change(idx, N, cut):
     """per cube: |shift ahead - shift behind| (deg) along the direction of the largest neighbour angle, and the crest flag"""
-    k = len(idx); key = (idx[:, 0]*KB+idx[:, 1])*KB+idx[:, 2]; lut = dict(zip(key.tolist(), range(k)))
+    k = len(idx); key = (idx[:, 0]*KB+idx[:, 1])*KB+idx[:, 2]; srt = np.argsort(key, kind='stable'); skey = key[srt]
     pmax = np.zeros(k); pdir = np.zeros(k, int); nb = np.full((k, 26), -1)
     for q, o in enumerate(OFFS):
         kk = ((idx[:, 0]+o[0])*KB+(idx[:, 1]+o[1]))*KB+(idx[:, 2]+o[2])
-        j = np.array([lut.get(int(x), -1) for x in kk]); nb[:, q] = j; h = j >= 0
+        pos = np.minimum(np.searchsorted(skey, kk), k-1); j = np.where(skey[pos] == kk, srt[pos], -1); nb[:, q] = j; h = j >= 0
         dot = (N[h]*N[j[h]]).sum(1); ang = np.degrees(np.arccos(np.clip(dot, -1, 1))); ang[dot < 0] = 0   # facing away = far side of a thin wall
         upd = np.zeros(k, bool); upd[h] = ang > pmax[h]; pmax[upd] = ang[upd[h]]; pdir[upd] = q
     opp = np.array([np.nonzero((OFFS == -o).all(1))[0][0] for o in OFFS])
@@ -35,8 +35,10 @@ def fold_change(idx, N, cut):
     return change, crest
 
 
-def find_dots(P, F, cells=1200, cut=17.0, spp=4.0, flat=True, log=None, height=None):
-    r = voxel.run(P, F, cells, 0.0, log, height=height, spp=spp, flat=flat)
+def find_dots(P, F, cells=1200, cut=17.0, spp=0.0, flat=True, log=None, height=None):
+    """spp=0: cubes straight from the triangles (voxel.run_direct, exact overlap test, facing read at the cube centre);
+    spp>0: the old sample-point sprinkle with spp samples per cube edge (slow, memory-heavy; kept for comparison)"""
+    r = voxel.run_direct(P, F, cells, log, height=height, flat=flat) if spp <= 0 else voxel.run(P, F, cells, 0.0, log, height=height, spp=spp, flat=flat)
     change, crest = fold_change(r['idx'], r['N'], cut)
     if log: log(f'fold change per cube: p50 {np.percentile(change, 50):.1f} p90 {np.percentile(change, 90):.1f} p99 {np.percentile(change, 99):.1f} deg; dots (>= {cut} deg, crest): {int(crest.sum())}')
     return dict(idx=r['idx'], N=r['N'], lo=r['lo'], size=r['size'], turn=change, line=crest, d1=r['d1'])
@@ -99,6 +101,6 @@ if __name__ == '__main__':
     path, outp = sys.argv[1], sys.argv[2]; a = sys.argv[3:]
     cells = int(a[0]) if a else 1200; cut = float(a[1]) if len(a) > 1 else 17.0; W = float(a[2]) if len(a) > 2 else 4.0
     m = trimesh.load(path, process=True); P, F = np.asarray(m.vertices), np.asarray(m.faces)
-    t0 = time.time(); res = find_dots(P, F, cells, cut, float(os.environ.get('SPP', 4)), os.environ.get('FLAT', '1') == '1', print); print(f'dots {time.time()-t0:.0f} s')
+    t0 = time.time(); res = find_dots(P, F, cells, cut, float(os.environ.get('SPP', 0)), os.environ.get('FLAT', '1') == '1', print); print(f'dots {time.time()-t0:.0f} s')
     t0 = time.time(); cv = strokes(res, W=W, log=print); print(f'strokes {time.time()-t0:.0f} s')
     np.savez(outp, n=np.array([len(c) for c in cv]), pts=np.vstack(cv)); print('saved', outp)

@@ -1,0 +1,6 @@
+grid 1300 cells/height, cell 0.050 mm: 3278337 surface cells from 138735607 samples
+turn per cell: p50 0.4 p90 8.1 p99 28.0 deg; line cells 1282518
+fold change per cube: p50 0.0 p90 2.6 p99 71.1 deg; dots (>= 17.0 deg, crest): 41404
+t 359.1630895137787
+test grid cubes 3278337 dots 41404 lo [ -0.89317048 101.60218811   1.42796218] size 0.04970177283653846
+app  grid cubes 3278337 dots 41404 lo [ -0.89317048 101.60218811   1.42796218] size 0.04970177283653846
