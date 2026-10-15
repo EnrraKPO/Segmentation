@@ -273,3 +273,11 @@ find_dots 102 s total (was 505 s on one core). 1 and 8 cores give identical grid
 Tie rule changed (user: a random side is not acceptable): when a cube centre is equally near two triangles, the cube
 takes the triangle whose facing points most directly at the cube centre (the side the cube is over). Deterministic,
 1 and 8 cores identical; toe patch dots 3211 (was 3267 with the arbitrary pick); `out/s_side_nail.png` ring unchanged.
+
+**Cube size is now only resolution (2026-10-15, late).** User's standard: finer cubes must never make the result worse.
+Test on the toe patch at 0.013 / 0.043 / 0.087 mm cubes: the dots converge to a sharp row exactly on the nail edge as
+the cube shrinks (`out/toes_0.013_nail.png`, `out/toes_0.043_nail.png`; fine cubes inside a triangle see nothing, as
+they should). What broke at fine cubes was stage two: its window (W, L), step and dot count (K) were in cubes, so they
+shrank with the cube. `creases.strokes` now takes W, L, K, step in mm (defaults 0.35, 1.0, 0.26, 0.087 = the old 4,
+12, 3, 1 cubes at 0.087 mm); the app shows them in mm and takes the cube size in mm (default 0.087). Nail ring is one
+closed stroke at all three sizes (`out/toes_*_mm_nail.png`). The earlier 'ruler' explanation in chat was wrong.

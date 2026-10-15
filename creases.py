@@ -6,9 +6,10 @@ Stage 1  find_dots(P, F, cells, cut, spp, flat, log) -> res
    neighbour direction with the largest arrow angle, |shift ahead - shift behind| in degrees. A cube is a dot when
    that change is >= cut and not smaller than the cubes behind/ahead.
 Stage 2  strokes(res, W, L, K, align, agree, minlen, log) -> list of curves (mm)
-   Thick stroke of half-width W through the dots: at each step the dots inside a window (L long, W wide) give the
-   position (weighted centre) and the heading (the axis they are arranged along); stops when fewer than K dots lie
-   ahead, on a sharp turn, on another stroke, or on its own tail."""
+   Thick stroke of half-width W mm through the dots: at each step the dots inside a window (L mm long, W mm wide) give
+   the position (weighted centre) and the heading (the axis they are arranged along); stops when less than K mm of
+   dot row lies ahead, on a sharp turn, on another stroke, or on its own tail. All lengths in mm, so the cube size
+   only sets the resolution."""
 import os, sys, time, numpy as np
 from scipy.spatial import cKDTree
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__))); import voxel
@@ -53,8 +54,11 @@ def find_dots(P, F, cells=1200, cut=17.0, spp=0.0, flat=True, log=None, height=N
     return dict(idx=r['idx'], N=r['N'], lo=r['lo'], size=r['size'], turn=change, line=crest, d1=r['d1'])
 
 
-def strokes(res, W=4.0, L=12.0, K=3, align=3.0, agree=30.0, minlen=10, log=None, step=1.0):
-    line = res['line']; X = (res['idx'][line]+0.5).astype(float); wgt = res['turn'][line]; lo, size = res['lo'], res['size']
+def strokes(res, W=0.35, L=1.0, K=0.26, align=3.0, agree=30.0, minlen=10, log=None, step=0.087):
+    """W, L, K, step in mm (independent of the cube size): half-width and half-length of the window, the length of dot
+    row needed ahead to continue (K/cube = dot count), and the node spacing. minlen in nodes."""
+    line = res['line']; lo, size = res['lo'], float(res['size']); X = (res['idx'][line]+0.5).astype(float); wgt = res['turn'][line]
+    W, L, step = W/size, L/size, step/size; K = max(1, int(round(K/size)))
     tree = cKDTree(X); owner = np.full(len(X), -1); R = np.hypot(L, W); cos_agree = np.cos(np.radians(agree))
 
     def window(p, h):
@@ -108,7 +112,7 @@ if __name__ == '__main__':
     """usage: python creases.py mesh out.npz [cells cut W]  (whole model; env SPP, FLAT=0 to blend)"""
     import trimesh, time
     path, outp = sys.argv[1], sys.argv[2]; a = sys.argv[3:]
-    cells = int(a[0]) if a else 1200; cut = float(a[1]) if len(a) > 1 else 17.0; W = float(a[2]) if len(a) > 2 else 4.0
+    cells = int(a[0]) if a else 1200; cut = float(a[1]) if len(a) > 1 else 17.0; W = float(a[2]) if len(a) > 2 else 0.35
     m = trimesh.load(path, process=True); P, F = np.asarray(m.vertices), np.asarray(m.faces)
     t0 = time.time(); res = find_dots(P, F, cells, cut, float(os.environ.get('SPP', 0)), os.environ.get('FLAT', '1') == '1', print); print(f'dots {time.time()-t0:.0f} s')
     t0 = time.time(); cv = strokes(res, W=W, log=print); print(f'strokes {time.time()-t0:.0f} s')

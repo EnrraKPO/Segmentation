@@ -1,7 +1,7 @@
 """Segmentation tool. Two stages, each run on its own and kept:
   1. Find dots   : cubes over the surface, each reading its own triangle's facing; a dot where the facing shift
                    changes sharply from one cube to the next (creases.find_dots). Parameters: cube size (mm), cut.
-  2. Build lines : one smooth thick stroke through each run of dots (creases.strokes). Parameters: thickness, stretch.
+  2. Build lines : one smooth thick stroke through each run of dots (creases.strokes). Parameters: thickness, stretch, min row ahead, all in mm.
 Run: python app.py (from this folder)."""
 import os, sys, time, traceback
 import numpy as np, trimesh
@@ -30,9 +30,9 @@ TIPS = dict(
     cells="Edge of the cubes laid over the surface, in mm. Should be a few times smaller than the model's triangles but not far below them (orc: 0.41 mm triangles, 0.087 mm cubes; leotard: 0.072 mm triangles, 0.050 mm cubes). Halving it gives four times the cubes and the time.",
     cut="How much the facing shift must change from one cube to the next for the cube to be a dot. Measured on the orc: plate edges ~80, nail edges ~40, skin wrinkles 18-22, soft toe flanks 8-15, flat skin 2-5. 17 keeps creases and drops soft forms.",
     flat="On: the cube reads the facing of the flat triangle under it, the surface the print has. Off: the render's blended facing, which spreads every fold over the neighbouring triangles and hides faint creases.",
-    W="Half the thickness of the stroke laid over the dots. Dots within this distance sideways belong to the stroke. 4 cubes swallows the one-or-two-cube band a crease makes; larger merges neighbouring parallel creases into one.",
-    L="How far ahead and behind the stroke looks when deciding its position and heading. Longer = smoother line, but a long straight stretch cuts corners on tight curves. 12 worked on nail rings and seams.",
-    K="The stroke needs at least this many dots ahead of it to continue, and in its window to start. Lower follows sparse dot rows (faint creases) but may start strokes on scattered dots.",
+    W="Half the thickness of the stroke laid over the dots, in mm. Dots within this distance sideways belong to the stroke. 0.35 swallows the narrow band a crease makes; larger merges neighbouring parallel creases into one.",
+    L="How far ahead and behind the stroke looks, in mm, when deciding its position and heading. Longer = smoother line, but a long straight stretch cuts corners on tight curves. 1.0 worked on nail rings and seams.",
+    K="The stroke needs at least this length of dot row ahead of it to continue, and in its window to start. Shorter follows sparse dot rows (faint creases) but may start strokes on scattered dots.",
     align="The dots in the window must be arranged along a line: the cloud must be at least this many times longer than it is wide. Keeps strokes from starting on or shooting toward scattered dots.",
     agree="The stroke stops where its heading would turn more than this in one step: a corner.",
     minlen="Strokes with fewer nodes than this are dropped. One node per cube.",
@@ -64,9 +64,9 @@ class App(QtWidgets.QMainWindow):
         side.addWidget(g1)
 
         g2 = QtWidgets.QGroupBox('2. Build lines'); f2 = QtWidgets.QFormLayout(g2)
-        self.sp_W = spin(4, 1, 30, 1); row(f2, 'Stroke half-width (cubes)', self.sp_W, TIPS['W'])
-        self.sp_L = spin(12, 2, 60, 2); row(f2, 'Stroke stretch (cubes)', self.sp_L, TIPS['L'])
-        self.sp_K = spin(3, 1, 20, 1); row(f2, 'Min dots in window', self.sp_K, TIPS['K'])
+        self.sp_W = spin(0.35, 0.02, 5, 0.05, 2); row(f2, 'Stroke half-width (mm)', self.sp_W, TIPS['W'])
+        self.sp_L = spin(1.0, 0.1, 10, 0.1, 2); row(f2, 'Stroke stretch (mm)', self.sp_L, TIPS['L'])
+        self.sp_K = spin(0.26, 0.02, 5, 0.05, 2); row(f2, 'Min dot row ahead (mm)', self.sp_K, TIPS['K'])
         self.sp_align = spin(3, 1, 10, 0.5, 1); row(f2, 'Alignment (long/wide)', self.sp_align, TIPS['align'])
         self.sp_agree = spin(30, 1, 90, 5); row(f2, 'Max turn per step (deg)', self.sp_agree, TIPS['agree'])
         self.sp_minlen = spin(10, 1, 500, 5); row(f2, 'Minimum stroke length (nodes)', self.sp_minlen, TIPS['minlen'])
@@ -108,7 +108,7 @@ class App(QtWidgets.QMainWindow):
         self.res = r; self.curves = None; self.logmsg(f'dots done in {time.time()-t0:.1f} s'); self.busy(False); self.redraw()
 
     def stroke_params(self):
-        return dict(W=self.sp_W.value(), L=self.sp_L.value(), K=int(self.sp_K.value()), align=self.sp_align.value(), agree=self.sp_agree.value(), minlen=int(self.sp_minlen.value()))
+        return dict(W=self.sp_W.value(), L=self.sp_L.value(), K=self.sp_K.value(), align=self.sp_align.value(), agree=self.sp_agree.value(), minlen=int(self.sp_minlen.value()))
 
     def build_lines(self):
         sp = self.stroke_params(); self.logmsg('--- build lines: ' + ', '.join(f'{k}={v}' for k, v in sp.items())); t0 = time.time()
