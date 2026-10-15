@@ -290,3 +290,30 @@ L 0.4..4.0 mm: 0.4..2.0 fine; at 4.0 the straight window cuts the ring's corners
 K 0.1..1.0 mm, align 1.5..5: ring intact, only the short strokes change. agree 15..60: no effect (window heading turns slowly).
 No handle flips the result between working and broken in this sweep; the user's experience of breakage was with the
 pre-mm stroke settings (cube-unit window), fixed in c44bc7d.
+
+## Session notes 2026-10-15 (evening): band strokes, no foreign stop, join step
+
+Survey of the orc with the previous pipeline (`survey.py mesh grid.npz chains.npz out_prefix`, 11 spots at zoom 6 and 15,
+`out/survey_*`): lines wobbled, broke at every corner, and several strokes sat on one cluster of dots. Test patch: the
+pauldron groove V, `python patch.py mesh out/pv 0.087 203.49,118.88,167.79 12` (24 mm box, whole pipeline in seconds;
+`closeup2.py` renders dots + strokes at a FOCUS and prints heading change per node = wobble).
+
+Findings, in the order they were settled with the user:
+1. **Strokes through the whole band, not the crest cubes.** The crest pick jitters by a cube from the grid; the centre
+   of the band of cubes above the cut does not. Wobble 3.5 -> 1.7 deg per node, groove edges straight. The dot measure
+   is now the angle between the facings one cube behind and one cube ahead across the feature (`span` in
+   `fold_change`); `res['line']` is that band (`turn >= cut`), `res['crest']` keeps the old crest, weights are turn
+   above the cut.
+2. **Rule "stop at dots owned by another stroke" removed** (user: it made no sense; a thicker pen only made lines
+   shrink). It was what stopped retracing: with it gone and only "don't seed on an owned dot", strokes retraced each
+   other full length (1000 strokes at W=0.2). Replaced by: **no new stroke where more than half the dots in the seed
+   window are owned.** With that, pen W=0.4 mm gives one line per edge, through corners, no stubs (`out/pvs_wide_w0.4.png`);
+   W=0.2 still leaves stubs. App default W is now 0.4.
+3. **Join step** (`creases.join`, app "Join reach (mm)", default 1.0): stroke ends are extended along their heading;
+   two ends whose rays meet ahead within reach are joined at the meeting point (corner), ends facing each other are
+   bridged (gap), an end that runs into another stroke is attached to it (tee). Groove V closed on both edges
+   (`out/pvsj_corner.png`, integrated: `out/pvi_corner.png`). Known: overshoot to a sharp point on rounded corners.
+
+Not done: whole-orc run with the new settings; wide walls (ring) not judged at zoom; `span.py` (wider spans) made the
+band wider, not crisper, and is not used. Lesson recorded in memory: when the user objects, ask what they mean before
+reshaping the explanation.

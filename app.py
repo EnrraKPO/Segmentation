@@ -1,7 +1,8 @@
 """Segmentation tool. Two stages, each run on its own and kept:
   1. Find dots   : cubes over the surface, each reading its own triangle's facing; a dot where the facing shift
                    changes sharply from one cube to the next (creases.find_dots). Parameters: cube size (mm), cut.
-  2. Build lines : one smooth thick stroke through each run of dots (creases.strokes). Parameters: thickness, stretch, min row ahead, all in mm.
+  2. Build lines : one smooth thick stroke through each run of dots (creases.strokes), then stroke ends joined at
+                   corners, gaps and tees (creases.join). Parameters: thickness, stretch, min row ahead, join reach, all in mm.
 Run: python app.py (from this folder)."""
 import os, sys, time, traceback
 import numpy as np, trimesh
@@ -30,7 +31,8 @@ TIPS = dict(
     cells="Edge of the cubes laid over the surface, in mm. Should be a few times smaller than the model's triangles but not far below them (orc: 0.41 mm triangles, 0.087 mm cubes; leotard: 0.072 mm triangles, 0.050 mm cubes). Halving it gives four times the cubes and the time.",
     cut="How much the facing shift must change from one cube to the next for the cube to be a dot. Measured on the orc: plate edges ~80, nail edges ~40, skin wrinkles 18-22, soft toe flanks 8-15, flat skin 2-5. 17 keeps creases and drops soft forms.",
     flat="On: the cube reads the facing of the flat triangle under it, the surface the print has. Off: the render's blended facing, which spreads every fold over the neighbouring triangles and hides faint creases.",
-    W="Half the thickness of the stroke laid over the dots, in mm. Dots within this distance sideways belong to the stroke. 0.35 swallows the narrow band a crease makes; larger merges neighbouring parallel creases into one.",
+    W="Half the thickness of the stroke laid over the dots, in mm. Dots within this distance sideways belong to the stroke. 0.4 covers the band a crease makes at 0.087 mm cubes; much larger merges neighbouring parallel creases into one.",
+    G="How far a stroke end is extended to meet another stroke: at a corner (two ends whose headings cross), across a gap (two ends facing each other) or into the side of another stroke. 0 = no joining.",
     L="How far ahead and behind the stroke looks, in mm, when deciding its position and heading. Longer = smoother line, but a long straight stretch cuts corners on tight curves. 1.0 worked on nail rings and seams.",
     K="The stroke needs at least this length of dot row ahead of it to continue, and in its window to start. Shorter follows sparse dot rows (faint creases) but may start strokes on scattered dots.",
     align="The dots in the window must be arranged along a line: the cloud must be at least this many times longer than it is wide. Keeps strokes from starting on or shooting toward scattered dots.",
@@ -64,12 +66,13 @@ class App(QtWidgets.QMainWindow):
         side.addWidget(g1)
 
         g2 = QtWidgets.QGroupBox('2. Build lines'); f2 = QtWidgets.QFormLayout(g2)
-        self.sp_W = spin(0.35, 0.02, 5, 0.05, 2); row(f2, 'Stroke half-width (mm)', self.sp_W, TIPS['W'])
+        self.sp_W = spin(0.4, 0.02, 5, 0.05, 2); row(f2, 'Stroke half-width (mm)', self.sp_W, TIPS['W'])
         self.sp_L = spin(1.0, 0.1, 10, 0.1, 2); row(f2, 'Stroke stretch (mm)', self.sp_L, TIPS['L'])
         self.sp_K = spin(0.26, 0.02, 5, 0.05, 2); row(f2, 'Min dot row ahead (mm)', self.sp_K, TIPS['K'])
         self.sp_align = spin(3, 1, 10, 0.5, 1); row(f2, 'Alignment (long/wide)', self.sp_align, TIPS['align'])
         self.sp_agree = spin(30, 1, 90, 5); row(f2, 'Max turn per step (deg)', self.sp_agree, TIPS['agree'])
         self.sp_minlen = spin(10, 1, 500, 5); row(f2, 'Minimum stroke length (nodes)', self.sp_minlen, TIPS['minlen'])
+        self.sp_G = spin(1.0, 0, 10, 0.1, 2); row(f2, 'Join reach (mm)', self.sp_G, TIPS['G'])
         self.btn_lines = QtWidgets.QPushButton('Build lines (from dots)'); self.btn_lines.clicked.connect(self.build_lines); self.btn_lines.setEnabled(False); f2.addRow(self.btn_lines)
         side.addWidget(g2)
 
@@ -77,6 +80,7 @@ class App(QtWidgets.QMainWindow):
         self.chk_curves = QtWidgets.QCheckBox('Show lines'); self.chk_curves.setChecked(True); self.chk_curves.stateChanged.connect(self.redraw); side.addWidget(self.chk_curves)
         self.chk_snap = QtWidgets.QCheckBox('Draw lines on the surface (a few seconds)'); self.chk_snap.setChecked(True); self.chk_snap.setToolTip(TIPS['snap']); self.chk_snap.stateChanged.connect(self.redraw); side.addWidget(self.chk_snap)
         self.btn_save = QtWidgets.QPushButton('Save lines…'); self.btn_save.clicked.connect(self.save); self.btn_save.setEnabled(False); side.addWidget(self.btn_save)
+        self.btn_dump = QtWidgets.QPushButton('Dump for debugging'); self.btn_dump.clicked.connect(self.dump); self.btn_dump.setToolTip('Writes dots, lines, log, settings and a screenshot of the viewport to out/debug/<time>/'); side.addWidget(self.btn_dump)
         self.txt = QtWidgets.QPlainTextEdit(); self.txt.setReadOnly(True); self.txt.setMaximumWidth(380); side.addWidget(self.txt, 1)
         self.plotter.set_background('white'); self.plotter.add_axes()
 
@@ -109,10 +113,12 @@ class App(QtWidgets.QMainWindow):
 
     def stroke_params(self):
         return dict(W=self.sp_W.value(), L=self.sp_L.value(), K=self.sp_K.value(), align=self.sp_align.value(), agree=self.sp_agree.value(), minlen=int(self.sp_minlen.value()))
+    def all_params(self): return dict(**self.stroke_params(), join_mm=self.sp_G.value())
 
     def build_lines(self):
         sp = self.stroke_params(); self.logmsg('--- build lines: ' + ', '.join(f'{k}={v}' for k, v in sp.items())); t0 = time.time()
-        self._start(lambda log: creases.strokes(self.res, log=log, **sp), lambda r: self._lines_done(r, t0))
+        G = self.sp_G.value()
+        self._start(lambda log: (lambda cv: creases.join(cv, G, log=log) if G > 0 else cv)(creases.strokes(self.res, log=log, **sp)), lambda r: self._lines_done(r, t0))
     def _lines_done(self, r, t0):
         self.curves = r; self.logmsg(f'lines done in {time.time()-t0:.1f} s'); self.busy(False); self.btn_save.setEnabled(True); self.redraw()
 
@@ -139,8 +145,29 @@ class App(QtWidgets.QMainWindow):
     def save(self):
         if not self.curves: return
         out = os.path.splitext(self.path)[0]+'_lines.npz'
-        prm = dict(cube_mm=self.sp_cube.value(), cut=self.sp_cut.value(), flat=self.chk_flat.isChecked(), **self.stroke_params())
+        prm = dict(cube_mm=self.sp_cube.value(), cut=self.sp_cut.value(), flat=self.chk_flat.isChecked(), **self.all_params())
         np.savez(out, n=np.array([len(c) for c in self.curves]), pts=np.vstack(self.curves), params=str(prm)); self.logmsg(f'saved {out}')
+
+    def dump(self):
+        """Everything on screen, to out/debug/<time>/: dots.npz (cube centres, drawn positions, grid), lines.npz (points,
+        run lengths), log.txt, settings.json (parameters, model, camera) and viewport.png. Works with any stage done."""
+        d = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'out', 'debug', time.strftime('%Y%m%d_%H%M%S')); os.makedirs(d, exist_ok=True)
+        try:
+            prm = dict(model=self.path, faces=None if self.F is None else int(len(self.F)), cube_mm=self.sp_cube.value(), cut=self.sp_cut.value(), flat=self.chk_flat.isChecked(),
+                       **self.all_params(), show_dots=self.chk_dots.isChecked(), show_lines=self.chk_curves.isChecked(), snap=self.chk_snap.isChecked(),
+                       camera=[list(map(float, v)) for v in self.plotter.camera_position], dots=0, lines=0)
+            if self.res is not None:
+                r = self.res; C = r['lo']+(r['idx'][r['line']]+0.5)*r['size']; D = C+0.5*r['size']*r['N'][r['line']]
+                np.savez(os.path.join(d, 'dots.npz'), centres=C, drawn=D, idx=r['idx'][r['line']], N=r['N'][r['line']], turn=r['turn'][r['line']], lo=r['lo'], size=r['size'])
+                prm['dots'] = int(len(C))
+            if self.curves:
+                np.savez(os.path.join(d, 'lines.npz'), n=np.array([len(c) for c in self.curves]), pts=np.vstack(self.curves)); prm['lines'] = len(self.curves)
+            with open(os.path.join(d, 'log.txt'), 'w', encoding='utf-8') as f: f.write(self.txt.toPlainText())
+            import json
+            with open(os.path.join(d, 'settings.json'), 'w', encoding='utf-8') as f: json.dump(prm, f, indent=1)
+            self.plotter.screenshot(os.path.join(d, 'viewport.png'))
+            self.logmsg(f'dumped {prm["dots"]} dots, {prm["lines"]} lines, log, settings, screenshot to {d}')
+        except Exception: self.logmsg(traceback.format_exc())
 
 
 if __name__ == '__main__':
