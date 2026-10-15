@@ -180,7 +180,7 @@ idea (user's): coarse pass generous, then a finer-cube pass in a band around the
 angle at the pixel size the user judges at; soft bulges should fall away there. The "cubes finer than triangles are
 useless" claim from 2026-10-14 is withdrawn: the render shades smoothly inside triangles and the cubes read that same
 interpolated normal. Helpers: `pick.py` (pixel -> 3D point for a view), `graded_view.py` (all cubes coloured by a
-field), `mesh_profile.py` (true normal turn along a path on the mesh), `profile.py` (grid turn along d1).
+field), `mesh_profile.py` (true normal turn along a path on the mesh), `grid_profile.py` (grid turn along d1).
 User's marked defects are in `in/detection_issues_1..3.png`.
 
 **Direction-aware test (end of 2026-10-15).** The pair angle measures only the AMOUNT of tilt per cube; a toe flank
@@ -317,3 +317,14 @@ Findings, in the order they were settled with the user:
 Not done: whole-orc run with the new settings; wide walls (ring) not judged at zoom; `span.py` (wider spans) made the
 band wider, not crisper, and is not used. Lesson recorded in memory: when the user objects, ask what they mean before
 reshaping the explanation.
+
+**Speed (2026-10-15, late).** The user's whole-orc "Build lines" took 20 min. Causes and fixes: (1) a failed short stroke
+was undone by scanning the whole owner array (now only its own claimed dots); the foreign count was a Python loop
+(now vectorised); the join rebuilt its end list after every merge (now once per pass). Strokes 275 s. (2) Strokes
+are now traced per cluster of dots (connected within 3 cubes; `creases.clusters`) in a process pool, biggest first;
+clusters above 20k dots are cut into 22 mm blocks (the plate outline is 30 % of all dots). Lines never cross between
+clusters or blocks; `join` bridges those (gap rule). Strokes 16 s, join 12 s, dots 145 s: 3 min for the orc.
+Node count 504k vs 701k serial (short pieces at block borders dropped by minlen). `profile.py` renamed
+`grid_profile.py`: it shadowed the stdlib module and crashed any worker that imported cProfile.
+Survey of the new result: `out/sv2_*_z15.png`. Pauldron and bracer good; mouth/nose still a mess (soft skin above the
+cut everywhere at 0.087 mm: a dot-stage problem).

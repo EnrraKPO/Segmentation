@@ -59,12 +59,9 @@ def find_dots(P, F, cells=1200, cut=17.0, spp=0.0, flat=True, log=None, height=N
     return dict(idx=r['idx'], N=r['N'], lo=r['lo'], size=r['size'], turn=span, line=band, crest=crest, change=change, d1=r['d1'], cut=cut)
 
 
-def strokes(res, W=0.4, L=1.0, K=0.26, align=3.0, agree=30.0, minlen=10, log=None, step=0.087, stop_foreign=False):
-    """W, L, K, step in mm (independent of the cube size): half-width and half-length of the window, the length of dot
-    row needed ahead to continue (K/cube = dot count), and the node spacing. minlen in nodes."""
-    line = res['line']; lo, size = res['lo'], float(res['size']); X = (res['idx'][line]+0.5).astype(float)
-    wgt = np.maximum(res['turn'][line]-float(res.get('cut', 0)), 0)+1e-3     # weight = turn above the cut, so the stroke centres on the band
-    W, L, step = W/size, L/size, step/size; K = max(1, int(round(K/size)))
+def _trace(args):
+    """strokes through one cluster of dots; X in cubes, W L step in cubes, K in dots. Returns curves in cube units."""
+    X, wgt, W, L, K, align, agree, minlen, step, stop_foreign = args
     tree = cKDTree(X); owner = np.full(len(X), -1); R = np.hypot(L, W); cos_agree = np.cos(np.radians(agree))
 
     def window(p, h):
@@ -81,9 +78,9 @@ def strokes(res, W=0.4, L=1.0, K=0.26, align=3.0, agree=30.0, minlen=10, log=Non
         if ev[-1] < align*align*max(ev[-2], 1e-9): return None
         if ax @ h < 0: ax = -ax
         q = p+(c-p)-((c-p) @ h)*h
-        return q, ax, int((al > 0).sum()), sum(1 for k in nb if owner[k] not in (-1, tid)), len(nb)
+        ow = owner[nb]; return q, ax, int((al > 0).sum()), int(((ow != -1) & (ow != tid)).sum()), len(nb)
 
-    def march(p, h, tid):
+    def march(p, h, tid, claimed):
         out = []; back = int(2*L)+5
         while True:
             q = p+step*h; r = fit(q, h, tid)
@@ -91,7 +88,7 @@ def strokes(res, W=0.4, L=1.0, K=0.26, align=3.0, agree=30.0, minlen=10, log=Non
             q, hq, ahead, foreign, _ = r
             if ahead < K or hq @ h < cos_agree or (stop_foreign and foreign > K): break   # foreign dots no longer stop a stroke (2026-10-15); new strokes still only seed on unowned dots
             if len(out) > back and np.linalg.norm(np.array(out[:-back])-q, axis=1).min() < W: break
-            for k in tree.query_ball_point(q, W): owner[k] = tid
+            kk = tree.query_ball_point(q, W); owner[kk] = tid; claimed.extend(kk)
             out.append(q); p, h = q, hq
             if len(out) > 20000: break
         return out
@@ -106,12 +103,49 @@ def strokes(res, W=0.4, L=1.0, K=0.26, align=3.0, agree=30.0, minlen=10, log=Non
         if r is None: continue
         if r[3] > 0.5*r[4]: continue      # seed window mostly owned by another stroke: that line is drawn already
         p0, h0 = r[0], r[1]; tid = len(curves)
-        for k in tree.query_ball_point(p0, W): owner[k] = tid
-        ch = march(p0, -h0, tid)[::-1]+[p0]+march(p0, h0, tid)
-        if len(ch) < minlen: owner[owner == tid] = -1; curves.append(None); continue
-        curves.append(lo+np.array(ch)*size)
-    curves = [c for c in curves if c is not None]
-    if log: log(f'strokes {len(curves)}, nodes {sum(len(c) for c in curves)}, dots unclaimed {int((owner == -1).sum())} of {len(X)}')
+        kk = tree.query_ball_point(p0, W); owner[kk] = tid; claimed = list(kk)
+        ch = march(p0, -h0, tid, claimed)[::-1]+[p0]+march(p0, h0, tid, claimed)
+        if len(ch) < minlen: owner[claimed] = -1; curves.append(None); continue
+        curves.append(np.array(ch))
+    return [c for c in curves if c is not None], int((owner == -1).sum())
+
+
+def clusters(X, r):
+    """label dots by connectivity: dots within r cubes of each other are in one cluster"""
+    from scipy.sparse import coo_matrix
+    from scipy.sparse.csgraph import connected_components
+    pairs = cKDTree(X).query_pairs(r, output_type='ndarray')
+    A = coo_matrix((np.ones(len(pairs), bool), (pairs[:, 0], pairs[:, 1])), shape=(len(X), len(X)))
+    return connected_components(A, directed=False)[1]
+
+
+def strokes(res, W=0.4, L=1.0, K=0.26, align=3.0, agree=30.0, minlen=10, log=None, step=0.087, stop_foreign=False, workers=None):
+    """W, L, K, step in mm (independent of the cube size): half-width and half-length of the window, the length of dot
+    row needed ahead to continue (K/cube = dot count), and the node spacing. minlen in nodes.
+    The dots are first grouped into clusters (connected within 3 cubes); each cluster is traced on its own, in
+    parallel over the cores, biggest clusters first. Lines never cross between clusters (the join step bridges gaps)."""
+    import time
+    from concurrent.futures import ProcessPoolExecutor
+    line = res['line']; lo, size = res['lo'], float(res['size']); X = (res['idx'][line]+0.5).astype(float)
+    wgt = np.maximum(res['turn'][line]-float(res.get('cut', 0)), 0)+1e-3     # weight = turn above the cut, so the stroke centres on the band
+    W, L, step = W/size, L/size, step/size; K = max(1, int(round(K/size)))
+    t0 = time.time(); lab = clusters(X, 3.0); order = np.argsort(lab, kind='stable'); bounds = np.flatnonzero(np.diff(lab[order]))+1
+    groups = [g for g in np.split(order, bounds) if len(g) >= K]
+    CAP, B = 20000, 250      # a cluster above CAP dots is cut into blocks of B cubes (10 mm at 0.087) so no single core holds the whole plate outline; join bridges the cuts
+    split = []
+    for g in groups:
+        if len(g) <= CAP: split.append(g); continue
+        blk = np.floor(X[g]/B).astype(int); key = (blk[:, 0]*4096+blk[:, 1])*4096+blk[:, 2]; o = np.argsort(key, kind='stable'); b = np.flatnonzero(np.diff(key[o]))+1
+        split.extend(g[o][p] for p in np.split(np.arange(len(g)), b) if len(p) >= K)
+    groups = sorted(split, key=len, reverse=True)
+    if log: log(f'{len(X)} dots in {len(groups)} clusters (largest {len(groups[0]) if groups else 0}), {time.time()-t0:.0f} s')
+    tasks = [(X[g], wgt[g], W, L, K, align, agree, minlen, step, stop_foreign) for g in groups]
+    workers = workers or os.cpu_count() or 1
+    if workers > 1 and len(tasks) > 1:
+        with ProcessPoolExecutor(workers) as ex: results = list(ex.map(_trace, tasks, chunksize=1))
+    else: results = [_trace(t) for t in tasks]
+    curves = [lo+c*size for r in results for c in r[0]]; unclaimed = sum(r[1] for r in results)
+    if log: log(f'strokes {len(curves)}, nodes {sum(len(c) for c in curves)}, dots unclaimed {unclaimed} of {len(X)}')
     return curves
 
 
@@ -132,12 +166,13 @@ def join(curves, G=1.0, TOL=0.15, ANG=25.0, log=None):
         ends = [(i, e) for i in range(len(S)) if alive[i] for e in (0, 1)]
         if not ends: break
         E = np.array([head(S[i], e)[0] for i, e in ends]); tree = cKDTree(E)
+        used = set()
         for a, (i, ei) in enumerate(ends):
-            if not alive[i]: continue
+            if not alive[i] or a in used: continue
             pa, ha = head(S[i], ei); best = None
             for b in tree.query_ball_point(pa, G):
                 j, ej = ends[b]
-                if b == a or j == i or not alive[j]: continue
+                if b == a or b in used or j == i or not alive[j]: continue
                 pb, hb = head(S[j], ej)
                 if ha @ hb < -cos_ang:
                     d = pb-pa; Ld = np.linalg.norm(d); d = d/(Ld+1e-12)
@@ -153,7 +188,8 @@ def join(curves, G=1.0, TOL=0.15, ANG=25.0, log=None):
             if best is None: continue
             kind, _, j, ej, X = best
             A = S[i] if ei else S[i][::-1]; B = S[j][::-1] if ej else S[j]
-            S[i] = np.vstack([A]+([X] if X is not None else [])+[B]); alive[j] = False; joins[kind] += 1; changed = True; break
+            S[i] = np.vstack([A]+([X] if X is not None else [])+[B]); alive[j] = False; joins[kind] += 1; changed = True
+            used.update(k for k, (jj, ee) in enumerate(ends) if jj in (i, j))   # both strokes' ends have moved: next pass
     S = [c for c, al in zip(S, alive) if al]
     if S:
         allp = np.vstack(S); owner = np.concatenate([np.full(len(c), k) for k, c in enumerate(S)]); tree = cKDTree(allp)
