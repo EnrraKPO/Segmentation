@@ -281,3 +281,12 @@ they should). What broke at fine cubes was stage two: its window (W, L), step an
 shrank with the cube. `creases.strokes` now takes W, L, K, step in mm (defaults 0.35, 1.0, 0.26, 0.087 = the old 4,
 12, 3, 1 cubes at 0.087 mm); the app shows them in mm and takes the cube size in mm (default 0.087). Nail ring is one
 closed stroke at all three sizes (`out/toes_*_mm_nail.png`). The earlier 'ruler' explanation in chat was wrong.
+
+**Handle sweep (2026-10-15, late; `sweep.py`, toe patch at 0.043 mm, one handle at a time, `out/sw_*`).**
+cut 8/12/17/25/35: dots 37800/16982/8053/3922/2198, strokes 273/97/49/16/11; monotone; the nail ring stays one
+stroke up to 17 and at 25 stops where the softer lower part of the edge drops below the cut (correct).
+W 0.15..1.0 mm: ring one stroke throughout; at 0.6 and 1.0 a small gap opens where the ring closes.
+L 0.4..4.0 mm: 0.4..2.0 fine; at 4.0 the straight window cuts the ring's corners and runs past the dot rows (`out/sw_L_4.0_toes.png`), the documented limit.
+K 0.1..1.0 mm, align 1.5..5: ring intact, only the short strokes change. agree 15..60: no effect (window heading turns slowly).
+No handle flips the result between working and broken in this sweep; the user's experience of breakage was with the
+pre-mm stroke settings (cube-unit window), fixed in c44bc7d.
