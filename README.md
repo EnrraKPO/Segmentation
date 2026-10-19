@@ -328,3 +328,29 @@ Node count 504k vs 701k serial (short pieces at block borders dropped by minlen)
 `grid_profile.py`: it shadowed the stdlib module and crashed any worker that imported cProfile.
 Survey of the new result: `out/sv2_*_z15.png`. Pauldron and bracer good; mouth/nose still a mess (soft skin above the
 cut everywhere at 0.087 mm: a dot-stage problem).
+
+## Session notes 2026-10-17: anchored walk (trace4) in the app
+
+- Dot strength is now shown in the app (plasma colour, cut..99th percentile, colour bar).
+- New line stage `trace4.py` (anchored walk), concept in `docs/brief_anchored_walk.md`. Seed = strongest free dot;
+  axis from PCA of a sphere of dots; band = dots connected (1.8 cubes) to the anchor inside a thin slice across the
+  axis; node = weighted mean moved across only, pulled toward the trend (PULL); next anchor scored by closeness to the
+  trend line (AFALL) within REACH; lines end exactly on other lines (collision), at uncertain spots, or when no anchor.
+  Both directions from the seed; loop closure; short lines dropped.
+- Settled defaults: SLICE 0.7, REACH 0.22, PULL 1, AFALL 2, ASTR 0, HILL 0, LEAD 0. Pauldron patch: 45 lines,
+  6 nodes more than a cube off their local line (`out/t4_h0_r0.22_wide.png`).
+- Tried and backed out: hill rule on the across-profile (red herring on rounded edges), CORE node, GROW clip,
+  weak-dot filtering inside the band (LEAD): changed where nodes land but did not fix the rivet, and broke bands.
+- App: "Method" switch in Build lines. Anchored walk (step, slice, reach, trend pull, min length) is the default;
+  thick strokes + join stay selectable. `trace4.run(res, log, **kw)` is the entry point.
+- Open: rivet (lines do not follow the geometry; no agreed rule yet), hooks at line ends, junction region C,
+  backward smoothing (layer C), speed on full models (see timing below).
+- Timing, full orc grid (`out/orcfull17_grid1200.npz`, 0.17 mm cubes, 249k dots): 111 s single core, 4394 lines,
+  46k nodes, 163k dots (65%) unclaimed, most trials ending `no_anchor`/`short`. Usable, but the walk is a Python
+  loop per node; the per-cluster multi-core split used by the strokes would cut it. The high unclaimed share at this
+  coarse cube size is unjudged.
+- Multi-core: `trace4.walk_all` splits the dots into clusters (connected within max(3 cubes, reach+1)) and walks each
+  on its own core, as the strokes do; `run` uses it. Full orc: 111 s -> 32 s on 32 cores, bounded by the largest
+  cluster (67k dots, 26 s alone). Going lower means cutting big clusters, which cuts lines (no join step now).
+  Patch result nearly unchanged (51 lines vs 45; one messy blob near 192.5,122.8,161 reads "uncertain" on its own
+  where the whole-model run borrowed a false axis from neighbouring dots). Render `out/t4_par_wide.png`.

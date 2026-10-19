@@ -1,8 +1,10 @@
 """Segmentation tool. Two stages, each run on its own and kept:
   1. Find dots   : cubes over the surface, each reading its own triangle's facing; a dot where the facing shift
                    changes sharply from one cube to the next (creases.find_dots). Parameters: cube size (mm), cut.
-  2. Build lines : one smooth thick stroke through each run of dots (creases.strokes), then stroke ends joined at
-                   corners, gaps and tees (creases.join). Parameters: thickness, stretch, min row ahead, join reach, all in mm.
+  2. Build lines : anchored walk (trace4.walk): from the strongest free dot, read the band of connected dots in a thin
+                   slice across it, place a node, step along the line's trend to the next anchor; lines end on other
+                   lines. Parameters in mm: step, slice, reach; trend pull; min length. The old thick-stroke method
+                   (creases.strokes + creases.join) stays selectable for comparison.
 Run: python app.py (from this folder)."""
 import os, sys, time, traceback
 import numpy as np, trimesh
@@ -10,7 +12,7 @@ from PySide6 import QtCore, QtWidgets
 import pyvista as pv
 from pyvistaqt import QtInteractor
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-import creases
+import creases, trace4
 
 
 def load_mesh(path):
@@ -38,6 +40,12 @@ TIPS = dict(
     align="The dots in the window must be arranged along a line: the cloud must be at least this many times longer than it is wide. Keeps strokes from starting on or shooting toward scattered dots.",
     agree="The stroke stops where its heading would turn more than this in one step: a corner.",
     minlen="Strokes with fewer nodes than this are dropped. One node per cube.",
+    method="Anchored walk: the new line stage (see docs/brief_anchored_walk.md). Thick strokes: the previous method, kept for comparison.",
+    step="Distance between nodes along the line, in mm. About one cube.",
+    slice="Half-length, in mm, of the slice across the band that each node averages. Longer = smoother nodes, but a long slice blurs tight corners.",
+    reach="How far ahead, in mm, the next anchor may lie. A gap in the dot row shorter than this does not end the line; longer reaches may jump to another band.",
+    pull="How much the line's trend pulls each node toward where the line was heading (0 = node sits on the band alone, 1 = equal say). Smooths dents.",
+    wminlen="Lines with fewer nodes than this are dropped and their dots released.",
     snap="Moves each node onto the nearest surface point before drawing, so lines on sharp convex edges are not hidden inside the solid. Judge placement with this on; lifting lines off the surface shifts them sideways.",
 )
 
@@ -66,6 +74,14 @@ class App(QtWidgets.QMainWindow):
         side.addWidget(g1)
 
         g2 = QtWidgets.QGroupBox('2. Build lines'); f2 = QtWidgets.QFormLayout(g2)
+        self.cb_method = QtWidgets.QComboBox(); self.cb_method.addItems(['Anchored walk', 'Thick strokes (old)']); row(f2, 'Method', self.cb_method, TIPS['method'])
+        self.w_walk = QtWidgets.QWidget(); fw = QtWidgets.QFormLayout(self.w_walk); fw.setContentsMargins(0, 0, 0, 0); f2.addRow(self.w_walk)
+        self.sp_step = spin(0.087, 0.01, 2, 0.01, 3); row(fw, 'Step (mm)', self.sp_step, TIPS['step'])
+        self.sp_slice = spin(0.7, 0.05, 5, 0.05, 2); row(fw, 'Slice half-length (mm)', self.sp_slice, TIPS['slice'])
+        self.sp_reach = spin(0.22, 0.02, 3, 0.02, 2); row(fw, 'Reach (mm)', self.sp_reach, TIPS['reach'])
+        self.sp_pull = spin(1.0, 0, 5, 0.1, 1); row(fw, 'Trend pull', self.sp_pull, TIPS['pull'])
+        self.sp_wminlen = spin(8, 1, 500, 1); row(fw, 'Minimum line length (nodes)', self.sp_wminlen, TIPS['wminlen'])
+        self.w_old = QtWidgets.QWidget(); f2o = QtWidgets.QFormLayout(self.w_old); f2o.setContentsMargins(0, 0, 0, 0); f2.addRow(self.w_old); f2, f2w = f2o, f2
         self.sp_W = spin(0.4, 0.02, 5, 0.05, 2); row(f2, 'Stroke half-width (mm)', self.sp_W, TIPS['W'])
         self.sp_L = spin(1.0, 0.1, 10, 0.1, 2); row(f2, 'Stroke stretch (mm)', self.sp_L, TIPS['L'])
         self.sp_K = spin(0.26, 0.02, 5, 0.05, 2); row(f2, 'Min dot row ahead (mm)', self.sp_K, TIPS['K'])
@@ -73,7 +89,8 @@ class App(QtWidgets.QMainWindow):
         self.sp_agree = spin(30, 1, 90, 5); row(f2, 'Max turn per step (deg)', self.sp_agree, TIPS['agree'])
         self.sp_minlen = spin(10, 1, 500, 5); row(f2, 'Minimum stroke length (nodes)', self.sp_minlen, TIPS['minlen'])
         self.sp_G = spin(1.0, 0, 10, 0.1, 2); row(f2, 'Join reach (mm)', self.sp_G, TIPS['G'])
-        self.btn_lines = QtWidgets.QPushButton('Build lines (from dots)'); self.btn_lines.clicked.connect(self.build_lines); self.btn_lines.setEnabled(False); f2.addRow(self.btn_lines)
+        self.btn_lines = QtWidgets.QPushButton('Build lines (from dots)'); self.btn_lines.clicked.connect(self.build_lines); self.btn_lines.setEnabled(False); f2w.addRow(self.btn_lines)
+        self.cb_method.currentIndexChanged.connect(self._method_changed); self._method_changed()
         side.addWidget(g2)
 
         self.chk_dots = QtWidgets.QCheckBox('Show dots'); self.chk_dots.setChecked(True); self.chk_dots.stateChanged.connect(self.redraw); side.addWidget(self.chk_dots)
@@ -85,6 +102,8 @@ class App(QtWidgets.QMainWindow):
         self.plotter.set_background('white'); self.plotter.add_axes()
 
     def logmsg(self, s): self.txt.appendPlainText(s)
+    def _method_changed(self, *_):
+        walk = self.cb_method.currentIndex() == 0; self.w_walk.setVisible(walk); self.w_old.setVisible(not walk)
     def busy(self, b):
         self.btn_dots.setEnabled(not b and self.P is not None); self.btn_lines.setEnabled(not b and self.res is not None)
 
@@ -113,10 +132,17 @@ class App(QtWidgets.QMainWindow):
 
     def stroke_params(self):
         return dict(W=self.sp_W.value(), L=self.sp_L.value(), K=self.sp_K.value(), align=self.sp_align.value(), agree=self.sp_agree.value(), minlen=int(self.sp_minlen.value()))
-    def all_params(self): return dict(**self.stroke_params(), join_mm=self.sp_G.value())
+    def walk_params(self):
+        return dict(step=self.sp_step.value(), slice=self.sp_slice.value(), reach=self.sp_reach.value(), pull=self.sp_pull.value(), minlen=int(self.sp_wminlen.value()))
+    def all_params(self):
+        return dict(method=self.cb_method.currentText(), **({} if self.cb_method.currentIndex() else self.walk_params()), **({'join_mm': self.sp_G.value(), **self.stroke_params()} if self.cb_method.currentIndex() else {}))
 
     def build_lines(self):
-        sp = self.stroke_params(); self.logmsg('--- build lines: ' + ', '.join(f'{k}={v}' for k, v in sp.items())); t0 = time.time()
+        t0 = time.time()
+        if self.cb_method.currentIndex() == 0:
+            wp = self.walk_params(); self.logmsg('--- build lines (anchored walk): ' + ', '.join(f'{k}={v}' for k, v in wp.items()))
+            self._start(lambda log: trace4.run(self.res, log=log, **wp), lambda r: self._lines_done(r, t0)); return
+        sp = self.stroke_params(); self.logmsg('--- build lines (thick strokes): ' + ', '.join(f'{k}={v}' for k, v in sp.items()))
         G = self.sp_G.value()
         self._start(lambda log: (lambda cv: creases.join(cv, G, log=log) if G > 0 else cv)(creases.strokes(self.res, log=log, **sp)), lambda r: self._lines_done(r, t0))
     def _lines_done(self, r, t0):
@@ -130,7 +156,10 @@ class App(QtWidgets.QMainWindow):
         if self.res is not None and self.chk_dots.isChecked():
             C = self.res['lo']+(self.res['idx'][self.res['line']]+0.5)*self.res['size']
             C = C+0.5*self.res['size']*self.res['N'][self.res['line']]   # half a cube out along the facing, so dots on convex edges are not buried
-            self.plotter.add_points(C, color='red', point_size=5, render_points_as_spheres=True)
+            d = pv.PolyData(C); d['fold (deg)'] = self.res['turn'][self.res['line']]   # dot strength: how sharply the surface folds there
+            hi = float(np.percentile(d['fold (deg)'], 99))
+            self.plotter.add_mesh(d, scalars='fold (deg)', cmap='plasma', clim=(float(self.res['cut']), hi), point_size=5, render_points_as_spheres=True,
+                                  scalar_bar_args=dict(title='dot strength (deg)', vertical=True, position_x=0.88, position_y=0.3, height=0.4, width=0.06))
         if self.curves and self.chk_curves.isChecked():
             pts = np.vstack(self.curves)
             if self.chk_snap.isChecked():
