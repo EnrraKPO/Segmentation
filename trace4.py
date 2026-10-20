@@ -20,6 +20,12 @@ from scipy.spatial import cKDTree
 def env(k, d): return float(os.environ.get(k, d))
 
 
+def line_power(wgt_claimed, n_nodes):
+    """Power of a line: the strength (degrees above the cut) of every dot it gathered, divided by its node count.
+    A dense row of strong dots scores high; a sparse row low; a scatter lowest. One place to change."""
+    return float(wgt_claimed.sum())/max(n_nodes, 1)
+
+
 def walk(X, wgt, N, size, log=print, **kw):
     """X dots (cubes), wgt strengths, N facings. Returns list of node arrays (cubes) and the owner array."""
     step = kw.get('step', 0.087)/size; slice_h = kw.get('slice', 0.7)/size; sph0 = kw.get('sphere', 0.7)/size
@@ -27,13 +33,15 @@ def walk(X, wgt, N, size, log=print, **kw):
     reach = kw.get('reach', 0.22)/size   # how far ahead (cubes) the next anchor may lie: a gap in the dot row shorter than this does not end the line
     along = kw.get('along', 0.0)/size or reach   # ALONG: falloff (mm) of the along-score around one step; default = reach (the two roles coupled, as before)
     pull = kw.get('pull', 10.0); afall = kw.get('afall', 2.0); astr = kw.get('astr', 0.0)   # A: trend weight on the node; B: score falloff (cubes) off the centre line, strength exponent
+    cos_bend = np.cos(np.radians(kw.get('bend', 45.0)))   # BEND (deg): the dots' direction may steer the node only within this angle of the heading
+    powercut = kw.get('powercut', 3.0)   # POWERCUT: a line whose power (line_power) is below this never existed; its dots are released
     graze = kw.get('graze', 1.0)   # GRAZE: a node within this many cubes of another line's node lands on that node (shared); the line ends there
     minlen = int(kw.get('minlen', 8)); owned_frac = kw.get('owned', 0.5); valley = kw.get('valley', 1.3); core_frac = kw.get('core', 0.0); grow = kw.get('grow', 99.0); lead_k = kw.get('lead', 0.0); lead_min = int(kw.get('leadmin', 8)); fringe = kw.get('fringe', 1.0) > 0; ridge = kw.get('ridge', 0.0) > 0; sparse = kw.get('sparse', 0.0); hill = kw.get('hill', 0.0) > 0
     walk.probe = []
     tree = cKDTree(X); n = len(X); owner = np.full(n, -1); lines = []; node_tree = None; node_owner = np.zeros(0, int); node_index = np.zeros(0, int); all_nodes = np.zeros((0, 3))
     look = kw.get('look', 0.35)/size; lookw = kw.get('lookw', 1.0); lookn = int(kw.get('lookn', 0)); levp = kw.get('levp', 6.0); levn = kw.get('levn', 6.0)   # LEVP: power of the strength/standard curve (0 = off); LEVN: nodes of memory of the standard  # LOOK: how far ahead (mm) the probe corridors run, 0 = off; LOOKW: corridor half-width (cubes)
-    joins = []   # (line, node, other line, other node): shared nodes, where a line ended on another
-    stats = dict(no_anchor=0, collision=0, self_hit=0, uncertain=0, short=0, trend_used=0, clipped=0, look_trend=0, look_dots=0, look_mixed=0); kept_ends = dict(); diag = []
+    joins = []; powers = []   # joins: (line, node, other line, other node) shared nodes; powers: line_power per kept line
+    stats = dict(no_anchor=0, collision=0, self_hit=0, uncertain=0, short=0, trend_used=0, clipped=0, look_trend=0, look_dots=0, look_mixed=0, bend_held=0, weak=0); kept_ends = dict(); diag = []
 
     def support(p, dd):
         """dot weight in a corridor from point p along heading dd: half a step to LOOK ahead, LOOKW across"""
@@ -119,7 +127,9 @@ def walk(X, wgt, N, size, log=print, **kw):
     def finish(line, tid, claimed):
         nonlocal node_tree, node_owner, node_index, all_nodes
         if len(line) < minlen: owner[claimed] = -1; stats['short'] += 1; return False
-        L = np.array(line); lines.append(L)
+        pw = line_power(wgt[np.array(claimed, int)], len(line))
+        if pw < powercut: owner[claimed] = -1; stats['weak'] += 1; return False
+        L = np.array(line); lines.append(L); powers.append(pw)
         all_nodes = np.vstack([all_nodes, L]); node_owner = np.r_[node_owner, np.full(len(L), len(lines)-1)]; node_index = np.r_[node_index, np.arange(len(L))]
         node_tree = cKDTree(all_nodes); return True
 
@@ -151,15 +161,21 @@ def walk(X, wgt, N, size, log=print, **kw):
                 ha_from_dots = ha is not None
                 if ha is None: stats['trend_used'] += 1; ha = d                    # corner or crossing: the dots give no axis; the trend carries the line
                 elif ha @ d < 0: ha = -ha
+                held = False
+                if ha_from_dots and ha @ d < cos_bend:                             # BEND: the dots run off at a sharp angle: that is another crease, not
+                    stats['bend_held'] += 1; ha = d; held = True                    # this one bending; the heading wins outright (no referee below)
                 band = band_at(a, ha, expect=width)
                 if band is None: reasons.append('no_band'); ends_at.append((X[a] if 'a' in dir() else q).copy()); break
                 bd, bw, _, bc = band
                 ow = owner[bd]
+                f = None; stp = None; pn_dots = None; pred = None
                 wn = node_w(bc, level); level += ((wn*wgt[bc]).sum()/wn.sum()-level)/levn; pn = (X[bc]*wn[:, None]).sum(0)/wn.sum(); pn = X[a]+(pn-X[a])-((pn-X[a]) @ ha)*ha   # node: anchor moved across the band only
                 if pull > 0 or look > 0:                                                # A: the trend's prediction votes too
                     pred = nodes[-1]+((X[a]-nodes[-1]) @ d)*d; pred = X[a]+(pred-X[a])-((pred-X[a]) @ ha)*ha
                     f = pull/(1+pull)                                                   # fixed share of the trend's say
-                    if look > 0:                                                        # LOOK: probe ahead; the candidate with dot support ahead of it wins
+                    stp = pn-nodes[-1]; stp /= np.linalg.norm(stp)+1e-12
+                    if not held and stp @ d < cos_bend: stats['bend_held'] += 1; held = True   # the dots' node would turn the path sharply: not this crease
+                    if look > 0 and not held:                                           # LOOK: probe ahead; the candidate with dot support ahead of it wins
                         dl, pl = d, pred
                         if lookn > 0 and len(nodes) > lookn:                           # LOOKN: probe the trend of the nodes before the last few, which a drift under way has not yet bent
                             dl = nodes[-4]-nodes[-1-lookn]; dl /= np.linalg.norm(dl)+1e-12; pl = nodes[-4]+((X[a]-nodes[-4]) @ dl)*dl; pl = X[a]+(pl-X[a])-((pl-X[a]) @ ha)*ha
@@ -167,7 +183,7 @@ def walk(X, wgt, N, size, log=print, **kw):
                         if st > sa: pred = pl                                           # the long trend wins: the node goes back onto it
                         if st+sa > 0: f = pull*st/(pull*st+sa); stats['look_trend' if f > 0.8 else 'look_dots' if f < 0.2 else 'look_mixed'] += 1
                         walk.probe.append((f, st, sa, float(np.linalg.norm(pn-pred))))
-                    pn = (1-f)*pn+f*pred
+                    pn_dots = pn; pn = pred if held else (1-f)*pn+f*pred          # heading held: the dots get no say at all
                 hit = meets(pn)                                                         # the node grazes a node of another line: it becomes that node, shared
                 if hit is not None:
                     stats['collision'] += 1; reasons.append('collision'); ends_at.append(X[a].copy()); nodes.append(lines[hit[0]][hit[1]].copy()); joins_half.append((len(nodes)-1, hit))
@@ -177,7 +193,7 @@ def walk(X, wgt, N, size, log=print, **kw):
                     dist = np.linalg.norm(old-pn, axis=1); kmin = int(np.argmin(dist))
                     if dist[kmin] < 1.5: stats['self_hit'] += 1; reasons.append('loop'); ends_at.append((X[a] if 'a' in dir() else q).copy()); nodes.append(old[kmin]); break   # the ring has come round onto itself
                 free = bd[ow == -1]; owner[free] = tid; claimed.extend(free)
-                nodes.append(pn); width = 0.7*width+0.3*bw; widths.append((bw, float(np.linalg.norm(pn-X[a])), len(bd), ha_from_dots))
+                nodes.append(pn); width = 0.7*width+0.3*bw; widths.append((bw, float(np.linalg.norm(pn-X[a])), len(bd), ha_from_dots, held, f, float(np.degrees(np.arccos(np.clip(ha @ d, -1, 1)))), None if pred is None else float(np.linalg.norm(pn_dots-pred)), None if pred is None else float(np.linalg.norm(pred-X[a]))))
                 k = min(trend_n, len(nodes)-1); d = nodes[-1]-nodes[-1-k]; d /= np.linalg.norm(d)+1e-12
                 if len(nodes) > 20000: break
             halves.append(nodes); halves_w.append(widths); halves_j.append(joins_half)
@@ -188,14 +204,14 @@ def walk(X, wgt, N, size, log=print, **kw):
             diag.append((len(lines), reasons, ends_at, halves_w[1][::-1]+[None]+halves_w[0]))
         if finish(line, tid, claimed): joins.extend((len(lines)-1, i, j, k) for i, (j, k) in line_joins)
     if log: log(f'lines {len(lines)}, nodes {sum(len(l) for l in lines)}, dots unclaimed {int((owner == -1).sum())} of {n}; trials ended: {stats}; kept lines ended: {kept_ends}')
-    walk.diag = diag; walk.joins = joins
+    walk.diag = diag; walk.joins = joins; walk.power = powers
     return lines, owner
 
 
 def _task(t):
     X, wgt, N, size, kw = t
     lines, owner = walk(X, wgt, N, size, log=lambda *_: None, **kw)
-    return lines, int((owner == -1).sum()), walk.joins
+    return lines, int((owner == -1).sum()), walk.joins, walk.power
 
 
 def walk_all(X, wgt, N, size, log=print, workers=None, **kw):
@@ -208,6 +224,8 @@ def walk_all(X, wgt, N, size, log=print, workers=None, **kw):
     pairs = cKDTree(X).query_pairs(r, output_type='ndarray')
     lab = connected_components(coo_matrix((np.ones(len(pairs), bool), (pairs[:, 0], pairs[:, 1])), shape=(len(X), len(X))), directed=False)[1]
     order = np.argsort(lab, kind='stable'); groups = np.split(order, np.flatnonzero(np.diff(lab[order]))+1)
+    cos_bend = np.cos(np.radians(kw.get('bend', 45.0)))   # BEND (deg): the dots' direction may steer the node only within this angle of the heading
+    powercut = kw.get('powercut', 3.0)   # POWERCUT: a line whose power (line_power) is below this never existed; its dots are released
     graze = kw.get('graze', 1.0)   # GRAZE: a node within this many cubes of another line's node lands on that node (shared); the line ends there
     minlen = int(kw.get('minlen', 8)); groups = sorted([g for g in groups if len(g) >= minlen], key=len, reverse=True)
     if log: log(f'{len(X)} dots in {len(groups)} clusters (largest {len(groups[0]) if groups else 0}), {time.time()-t0:.1f} s')
@@ -215,12 +233,12 @@ def walk_all(X, wgt, N, size, log=print, workers=None, **kw):
     if workers > 1 and len(tasks) > 1:
         with ProcessPoolExecutor(workers) as ex: results = list(ex.map(_task, tasks, chunksize=1))
     else: results = [_task(t) for t in tasks]
-    lines = []; joins = []
-    for ls, _, js in results:                                                     # renumber the lines of each cluster into one list
-        base = len(lines); lines.extend(ls); joins.extend((base+i, k, base+j, m) for i, k, j, m in js)
+    lines = []; joins = []; powers = []
+    for ls, _, js, pw in results:                                                 # renumber the lines of each cluster into one list
+        base = len(lines); lines.extend(ls); joins.extend((base+i, k, base+j, m) for i, k, j, m in js); powers.extend(pw)
     unclaimed = sum(r_[1] for r_ in results)+(len(X)-sum(len(g) for g in groups))
     if log: log(f'lines {len(lines)}, nodes {sum(len(l) for l in lines)}, junctions {len(joins)}, dots unclaimed {unclaimed} of {len(X)}, {time.time()-t0:.1f} s on {workers} cores')
-    walk_all.joins = joins
+    walk_all.joins = joins; walk_all.power = powers
     return lines
 
 
@@ -229,18 +247,18 @@ def run(res, log=print, **kw):
     run.joins afterwards: (line, node, other line, other node) for every shared node (a line ended on another line's node)."""
     line = res['line']; size = float(res['size']); cut = float(res.get('cut', 0))
     X = (res['idx'][line]+0.5).astype(float); wgt = np.maximum(res['turn'][line]-cut, 0)+1e-3; N = res['N'][line]
-    lines = walk_all(X, wgt, N, size, log=log, **kw); run.joins = walk_all.joins
+    lines = walk_all(X, wgt, N, size, log=log, **kw); run.joins = walk_all.joins; run.power = walk_all.power
     return [res['lo']+l*size for l in lines]
 
 
 def main():
     G, outp = sys.argv[1], sys.argv[2]; g = np.load(G); line = g['line']; size = float(g['size']); cut = float(g['cut']) if 'cut' in g.files else 17.0
     X = (g['idx'][line]+0.5).astype(float); wgt = (np.maximum(g['turn'][line]-cut, 0)+1e-3)**env('WPOW', 1.0); N = g['N'][line]   # WPOW: how aggressively strong dots outweigh weak ones
-    kw = {k.lower(): env(k, d) for k, d in [('STEP', 0.087), ('SLICE', 0.7), ('SPHERE', 0.7), ('WMAX', 1.0), ('ALIGN', 1.5), ('TREND', 6), ('CONE', 45), ('MINLEN', 8), ('OWNED', 0.5), ('VALLEY', 1.3), ('CORE', 0.0), ('GROW', 99), ('PULL', 10.0), ('AFALL', 2.0), ('ASTR', 0.0), ('HILL', 0), ('REACH', 0.22), ('ALONG', 0.0), ('LOOK', 0.35), ('LOOKW', 1.0), ('LOOKN', 0), ('LEVP', 6.0), ('LEVN', 6), ('LEAD', 0.0), ('LEADMIN', 8), ('FRINGE', 1), ('RIDGE', 0), ('SPARSE', 0)]}
+    kw = {k.lower(): env(k, d) for k, d in [('STEP', 0.087), ('SLICE', 0.7), ('SPHERE', 0.7), ('WMAX', 1.0), ('ALIGN', 1.5), ('TREND', 6), ('CONE', 45), ('MINLEN', 8), ('OWNED', 0.5), ('VALLEY', 1.3), ('CORE', 0.0), ('GROW', 99), ('PULL', 10.0), ('AFALL', 2.0), ('ASTR', 0.0), ('HILL', 0), ('REACH', 0.22), ('ALONG', 0.0), ('LOOK', 0.35), ('LOOKW', 1.0), ('LOOKN', 0), ('LEVP', 6.0), ('LEVN', 6), ('BEND', 45.0), ('GRAZE', 1.0), ('POWERCUT', 3.0), ('LEAD', 0.0), ('LEADMIN', 8), ('FRINGE', 1), ('RIDGE', 0), ('SPARSE', 0)]}
     t0 = time.time(); lines = walk_all(X, wgt, N, size, **kw) if env('PAR', 1) > 0 else walk(X, wgt, N, size, **kw)[0]; print(f'{time.time()-t0:.1f} s')
     cv = [g['lo']+l*size for l in lines]
-    joins = walk_all.joins if env('PAR', 1) > 0 else walk.joins
-    np.savez(outp, n=np.array([len(c) for c in cv]), pts=np.vstack(cv) if cv else np.zeros((0, 3)), joins=np.array(joins, int).reshape(-1, 4)); print('saved', outp, f'({len(joins)} junctions)')
+    src = walk_all if env('PAR', 1) > 0 else walk; joins = src.joins
+    np.savez(outp, n=np.array([len(c) for c in cv]), pts=np.vstack(cv) if cv else np.zeros((0, 3)), joins=np.array(joins, int).reshape(-1, 4), power=np.array(src.power)); print('saved', outp, f'({len(joins)} junctions)')
 
 
 if __name__ == '__main__': main()

@@ -48,6 +48,8 @@ TIPS = dict(
     reach="How far ahead, in mm, the next anchor may lie. A gap in the dot row shorter than this does not end the line; longer reaches may jump to another band.",
     pull="How much the line's trend pulls each node toward where the line was heading (0 = node sits on the band alone, 1 = equal say). Smooths dents.",
     wminlen="Lines with fewer nodes than this are dropped and their dots released.",
+    bend="The dots may steer a node only within this angle of the line's heading. A sharper turn is another crease: the heading wins outright and the line ends when it runs out of dots ahead.",
+    powercut="Line power = strength (degrees above the cut) of every dot the line gathered, divided by its node count. A line under this power never existed: its dots are released. 0 = off.",
     snap="Moves each node onto the nearest surface point before drawing, so lines on sharp convex edges are not hidden inside the solid. Judge placement with this on; lifting lines off the surface shifts them sideways.",
 )
 
@@ -85,6 +87,8 @@ class App(QtWidgets.QMainWindow):
         self.sp_look = spin(0.35, 0, 2, 0.05, 2); row(fw, 'Look ahead (mm)', self.sp_look, TIPS['look'])
         self.sp_levp = spin(6.0, 0, 20, 0.5, 1); row(fw, 'Strength power', self.sp_levp, TIPS['levp'])
         self.sp_wminlen = spin(8, 1, 500, 1); row(fw, 'Minimum line length (nodes)', self.sp_wminlen, TIPS['wminlen'])
+        self.sp_bend = spin(45, 5, 180, 5); row(fw, 'Max turn for the dots (deg)', self.sp_bend, TIPS['bend'])
+        self.sp_powercut = spin(3, 0, 1000, 1, 1); row(fw, 'Line power cut', self.sp_powercut, TIPS['powercut'])
         self.w_old = QtWidgets.QWidget(); f2o = QtWidgets.QFormLayout(self.w_old); f2o.setContentsMargins(0, 0, 0, 0); f2.addRow(self.w_old); f2, f2w = f2o, f2
         self.sp_W = spin(0.4, 0.02, 5, 0.05, 2); row(f2, 'Stroke half-width (mm)', self.sp_W, TIPS['W'])
         self.sp_L = spin(1.0, 0.1, 10, 0.1, 2); row(f2, 'Stroke stretch (mm)', self.sp_L, TIPS['L'])
@@ -137,7 +141,7 @@ class App(QtWidgets.QMainWindow):
     def stroke_params(self):
         return dict(W=self.sp_W.value(), L=self.sp_L.value(), K=self.sp_K.value(), align=self.sp_align.value(), agree=self.sp_agree.value(), minlen=int(self.sp_minlen.value()))
     def walk_params(self):
-        return dict(step=self.sp_step.value(), slice=self.sp_slice.value(), reach=self.sp_reach.value(), pull=self.sp_pull.value(), look=self.sp_look.value(), levp=self.sp_levp.value(), minlen=int(self.sp_wminlen.value()))
+        return dict(step=self.sp_step.value(), slice=self.sp_slice.value(), reach=self.sp_reach.value(), pull=self.sp_pull.value(), look=self.sp_look.value(), levp=self.sp_levp.value(), minlen=int(self.sp_wminlen.value()), bend=self.sp_bend.value(), powercut=self.sp_powercut.value())
     def all_params(self):
         return dict(method=self.cb_method.currentText(), **({} if self.cb_method.currentIndex() else self.walk_params()), **({'join_mm': self.sp_G.value(), **self.stroke_params()} if self.cb_method.currentIndex() else {}))
 
