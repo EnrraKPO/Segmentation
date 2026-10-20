@@ -33,7 +33,7 @@ def walk(X, wgt, N, size, log=print, **kw):
     reach = kw.get('reach', 0.22)/size   # how far ahead (cubes) the next anchor may lie: a gap in the dot row shorter than this does not end the line
     along = kw.get('along', 0.0)/size or reach   # ALONG: falloff (mm) of the along-score around one step; default = reach (the two roles coupled, as before)
     pull = kw.get('pull', 10.0); afall = kw.get('afall', 2.0); astr = kw.get('astr', 0.0)   # A: trend weight on the node; B: score falloff (cubes) off the centre line, strength exponent
-    cos_bend = np.cos(np.radians(kw.get('bend', 45.0)))   # BEND (deg): the dots' direction may steer the node only within this angle of the heading
+    cos_bend = np.cos(np.radians(kw.get('bend', 45.0))); tan_bend = np.tan(np.radians(min(kw.get('bend', 45.0), 89.0)))   # BEND (deg): the dots' direction may steer the node only within this angle of the heading
     powercut = kw.get('powercut', 3.0)   # POWERCUT: a line whose power (line_power) is below this never existed; its dots are released
     graze = kw.get('graze', 1.0)   # GRAZE: a node within this many cubes of another line's node lands on that node (shared); the line ends there
     minlen = int(kw.get('minlen', 8)); owned_frac = kw.get('owned', 0.5); valley = kw.get('valley', 1.3); core_frac = kw.get('core', 0.0); grow = kw.get('grow', 99.0); lead_k = kw.get('lead', 0.0); lead_min = int(kw.get('leadmin', 8)); fringe = kw.get('fringe', 1.0) > 0; ridge = kw.get('ridge', 0.0) > 0; sparse = kw.get('sparse', 0.0); hill = kw.get('hill', 0.0) > 0
@@ -173,8 +173,13 @@ def walk(X, wgt, N, size, log=print, **kw):
                 if pull > 0 or look > 0:                                                # A: the trend's prediction votes too
                     pred = nodes[-1]+((X[a]-nodes[-1]) @ d)*d; pred = X[a]+(pred-X[a])-((pred-X[a]) @ ha)*ha
                     f = pull/(1+pull)                                                   # fixed share of the trend's say
-                    stp = pn-nodes[-1]; stp /= np.linalg.norm(stp)+1e-12
-                    if not held and stp @ d < cos_bend: stats['bend_held'] += 1; held = True   # the dots' node would turn the path sharply: not this crease
+                    stp = pn-nodes[-1]; s_al = stp @ d; s_ac = np.linalg.norm(stp-s_al*d)       # the turn the dots ask for, judged over a full step:
+                    if not held and s_ac > max(s_al, step)*tan_bend: stats['bend_held'] += 1; held = True   # a short step with a small side offset is not a sharp turn
+                    if held:                                                            # heading held: only the dots inside the allowed cone steer the node;
+                        offc = X[bc]-nodes[-1]; alc = offc @ d; acc = np.linalg.norm(offc-alc[:, None]*d, axis=1)   # the rest belong to another crease
+                        inc = acc <= np.maximum(alc, step)*tan_bend
+                        if inc.any(): wc = wn[inc]; pc = (X[bc][inc]*wc[:, None]).sum(0)/wc.sum(); pn = X[a]+(pc-X[a])-((pc-X[a]) @ ha)*ha
+                        else: pn = pred
                     if look > 0 and not held:                                           # LOOK: probe ahead; the candidate with dot support ahead of it wins
                         dl, pl = d, pred
                         if lookn > 0 and len(nodes) > lookn:                           # LOOKN: probe the trend of the nodes before the last few, which a drift under way has not yet bent
@@ -183,7 +188,7 @@ def walk(X, wgt, N, size, log=print, **kw):
                         if st > sa: pred = pl                                           # the long trend wins: the node goes back onto it
                         if st+sa > 0: f = pull*st/(pull*st+sa); stats['look_trend' if f > 0.8 else 'look_dots' if f < 0.2 else 'look_mixed'] += 1
                         walk.probe.append((f, st, sa, float(np.linalg.norm(pn-pred))))
-                    pn_dots = pn; pn = pred if held else (1-f)*pn+f*pred          # heading held: the dots get no say at all
+                    pn_dots = pn; pn = (1-f)*pn+f*pred                              # (held: pn is already the in-cone dots' node, no referee)
                 hit = meets(pn)                                                         # the node grazes a node of another line: it becomes that node, shared
                 if hit is not None:
                     stats['collision'] += 1; reasons.append('collision'); ends_at.append(X[a].copy()); nodes.append(lines[hit[0]][hit[1]].copy()); joins_half.append((len(nodes)-1, hit))
@@ -224,7 +229,7 @@ def walk_all(X, wgt, N, size, log=print, workers=None, **kw):
     pairs = cKDTree(X).query_pairs(r, output_type='ndarray')
     lab = connected_components(coo_matrix((np.ones(len(pairs), bool), (pairs[:, 0], pairs[:, 1])), shape=(len(X), len(X))), directed=False)[1]
     order = np.argsort(lab, kind='stable'); groups = np.split(order, np.flatnonzero(np.diff(lab[order]))+1)
-    cos_bend = np.cos(np.radians(kw.get('bend', 45.0)))   # BEND (deg): the dots' direction may steer the node only within this angle of the heading
+    cos_bend = np.cos(np.radians(kw.get('bend', 45.0))); tan_bend = np.tan(np.radians(min(kw.get('bend', 45.0), 89.0)))   # BEND (deg): the dots' direction may steer the node only within this angle of the heading
     powercut = kw.get('powercut', 3.0)   # POWERCUT: a line whose power (line_power) is below this never existed; its dots are released
     graze = kw.get('graze', 1.0)   # GRAZE: a node within this many cubes of another line's node lands on that node (shared); the line ends there
     minlen = int(kw.get('minlen', 8)); groups = sorted([g for g in groups if len(g) >= minlen], key=len, reverse=True)
