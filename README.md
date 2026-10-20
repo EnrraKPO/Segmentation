@@ -354,3 +354,39 @@ cut everywhere at 0.087 mm: a dot-stage problem).
   cluster (67k dots, 26 s alone). Going lower means cutting big clusters, which cuts lines (no join step now).
   Patch result nearly unchanged (51 lines vs 45; one messy blob near 192.5,122.8,161 reads "uncertain" on its own
   where the whole-model run borrowed a false axis from neighbouring dots). Render `out/t4_par_wide.png`.
+
+## Session notes 2026-10-20: junction landing, bend hold, power cut; all backed out
+
+Committed first: the 18/19 October work (trend pull 10, look-ahead probe LOOK, strength curve LEVP) as f16e15a.
+End state: **the walk is back at f16e15a** (commit d9479a9); only the app's dot-set saving stays (`out/dots/`,
+last set reloaded with the model, "Load saved dots…"). The walk changes below live in the history
+(036921d, 0968ea8, aa6885a) and in the notes here; none is in the code.
+
+**Found and agreed.** Lines stopped about a millimetre short of junctions: a line's slice claims every connected dot up
+to 1 mm beside it, so the first line through a junction claimed the start of the crossing band, and the next line
+ended at the first owned dot (measured on the pauldron patch: 21 collision ends, stopping dot 0.6-1.3 mm from the
+owning line). Agreed rules: dot ownership must never end a line; a line ends when its new node grazes a node of
+another line (within one cube) and that node becomes shared by both (the junction record; later the region stage
+walks loops of pieces between shared nodes, turning the same way at each junction).
+
+**Built and judged.** Graze rule alone: junction ends exact, but on the whole orc the lines looked sloppy: hooks at
+line ends (the look-ahead referee hands the node to the dots at junctions, where the crossing crease has more dots
+ahead than the own crease), side-by-side lines in weak clouds (second seeds that the ownership stop used to kill),
+and stubs/curls on scatter. Then: BEND (dots may steer only within 45 deg of the heading; held = in-cone dots only)
+removed hooks on the shield (dents 235 -> 7 in the test area) but its first version straightened curves into chords
+(ring edges broke); line power = gathered strength per node with a cut (default 3) removed the stubs while keeping
+soft folds. The user judged the whole-model result still worse than the morning's: stupid lines on no visible
+crease, wobble, breaks; the notch rim (a strong trail) untraced because a neighbouring line's slice claimed its dots
+from 0.6 mm away so no seed could start there. Two further attempts (band width/axis from strong dots only; the
+LEVP say curve applied to band, width, axis, anchor, support and claims) fragmented lines and bred siblings on the
+shield; reverted unrun.
+
+**Principles stated by the user (to design from, not yet implemented):** a strong dot always earns a line, however
+short; a weak row earns one only if dense along its trail; weak and sparse is not a line and must never be born,
+not killed later. A line that reaches another line shares a node with it. Lines must trail the geometry faithfully:
+a steep curve is fine, a sharp corner is two lines meeting. The curve of influence (LEVP) is applied today only to
+the node average, not to the band, width, axis, anchor choice or claims; the user sees today's drift and wobble as
+that inconsistency. Test spots: shield facet (dump 20261020_144432, view centre 162.13,137.7,107.92), ring
+(20261020_163631, 194.72,123.34,169.49), notch rim (20261020_165259, rim point 219.51,167.43,165.39).
+Helpers in the scratchpad of this session: siblings.py, kinks.py, follow.py (node-by-node record), rewalk_view.py,
+strong_trail.py, held_check.py, bend_sweep.py, powerview.py.
