@@ -13,6 +13,34 @@ import pyvista as pv
 from pyvistaqt import QtInteractor
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import creases, trace4
+DOTS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'out', 'dots')   # saved dot sets; last.json maps model name -> last file
+
+
+def save_dots(res, model, cube, cut, flat):
+    """Keep only the dots (cubes above the cut): idx, N, turn, plus lo, size, cut and the settings. Written to out/dots/
+    as <model>_<cube>mm_cut<cut>[_blend]_<time>.npz and noted as the last set for this model."""
+    import json
+    os.makedirs(DOTS_DIR, exist_ok=True); m = res['line']; base = os.path.splitext(os.path.basename(model))[0]
+    name = f'{base}_{cube:g}mm_cut{cut:g}{"" if flat else "_blend"}_{time.strftime("%Y%m%d_%H%M%S")}.npz'; path = os.path.join(DOTS_DIR, name)
+    np.savez(path, idx=res['idx'][m], N=res['N'][m], turn=res['turn'][m], lo=res['lo'], size=res['size'], cut=res['cut'], cube=cube, flat=flat, model=model)
+    lj = os.path.join(DOTS_DIR, 'last.json'); last = json.load(open(lj)) if os.path.exists(lj) else {}
+    last[os.path.basename(model)] = name; json.dump(last, open(lj, 'w'), indent=1)
+    return path
+
+
+def load_dots(path):
+    """A saved dot set back into the res dict the line stage reads (every stored cube is a dot)."""
+    z = np.load(path, allow_pickle=True); k = len(z['idx'])
+    res = dict(idx=z['idx'], N=z['N'], turn=z['turn'], line=np.ones(k, bool), lo=z['lo'], size=float(z['size']), cut=float(z['cut']))
+    return res, float(z['cube']), bool(z['flat']), str(z['model'])
+
+
+def last_dots(model):
+    import json
+    lj = os.path.join(DOTS_DIR, 'last.json')
+    if not os.path.exists(lj): return None
+    name = json.load(open(lj)).get(os.path.basename(model)); p = name and os.path.join(DOTS_DIR, name)
+    return p if p and os.path.exists(p) else None
 
 
 def load_mesh(path):
@@ -75,6 +103,7 @@ class App(QtWidgets.QMainWindow):
         self.sp_cut = spin(17, 1, 90, 1); row(f1, 'Cut (deg)', self.sp_cut, TIPS['cut'])
         self.chk_flat = QtWidgets.QCheckBox("Read each triangle's own facing (no corner blending)"); self.chk_flat.setChecked(True); self.chk_flat.setToolTip(TIPS['flat']); f1.addRow(self.chk_flat)
         self.btn_dots = QtWidgets.QPushButton('Find dots'); self.btn_dots.clicked.connect(self.find_dots); self.btn_dots.setEnabled(False); f1.addRow(self.btn_dots)
+        self.btn_load_dots = QtWidgets.QPushButton('Load saved dots…'); self.btn_load_dots.clicked.connect(self.load_dots); self.btn_load_dots.setEnabled(False); self.btn_load_dots.setToolTip('Dot sets are saved to out/dots/ every time Find dots finishes; opening a model loads its last set by itself.'); f1.addRow(self.btn_load_dots)
         side.addWidget(g1)
 
         g2 = QtWidgets.QGroupBox('2. Build lines'); f2 = QtWidgets.QFormLayout(g2)
@@ -113,7 +142,7 @@ class App(QtWidgets.QMainWindow):
     def _method_changed(self, *_):
         walk = self.cb_method.currentIndex() == 0; self.w_walk.setVisible(walk); self.w_old.setVisible(not walk)
     def busy(self, b):
-        self.btn_dots.setEnabled(not b and self.P is not None); self.btn_lines.setEnabled(not b and self.res is not None)
+        self.btn_dots.setEnabled(not b and self.P is not None); self.btn_load_dots.setEnabled(not b and self.P is not None); self.btn_lines.setEnabled(not b and self.res is not None)
 
     def load(self):
         path, _ = QtWidgets.QFileDialog.getOpenFileName(self, 'Open STL', '', 'Meshes (*.stl *.obj *.ply *.3mf)')
@@ -124,7 +153,21 @@ class App(QtWidgets.QMainWindow):
         h = float((self.P.max(0)-self.P.min(0)).max())
         e = np.linalg.norm(self.P[self.F[:, 1]]-self.P[self.F[:, 0]], axis=1)
         self.logmsg(f'loaded {os.path.basename(path)}: {len(self.F)} faces, height {h:.1f} mm, typical triangle edge {np.median(e):.3f} mm')
+        p = last_dots(path)
+        if p: self._use_dots(p)
         self.busy(False); self.redraw()
+
+    def _use_dots(self, p):
+        try: res, cube, flat, model = load_dots(p)
+        except Exception as ex: self.logmsg(f'could not load dots from {p}: {ex}'); return
+        self.res = res; self.curves = None; self.btn_save.setEnabled(False); self.sp_cube.setValue(cube); self.sp_cut.setValue(res['cut']); self.chk_flat.setChecked(flat)
+        self.logmsg(f'loaded {len(res["idx"])} dots from {os.path.basename(p)} (cube {cube:g} mm, cut {res["cut"]:g}, {"flat" if flat else "blended"})')
+
+    def load_dots(self):
+        os.makedirs(DOTS_DIR, exist_ok=True)
+        p, _ = QtWidgets.QFileDialog.getOpenFileName(self, 'Load saved dots', DOTS_DIR, 'Dot sets (*.npz)')
+        if not p: return
+        self._use_dots(p); self.busy(False); self.redraw()
 
     def _start(self, fn, on_done):
         self.busy(True); self.worker = Worker(fn); self.worker.log.connect(self.logmsg); self.worker.done.connect(on_done); self.worker.failed.connect(self.failed); self.worker.start()
@@ -136,7 +179,10 @@ class App(QtWidgets.QMainWindow):
         self.logmsg(f'--- find dots: cube={size} mm ({cells} cells over {h:.1f} mm), cut={cut}, flat={flat}'); t0 = time.time()
         self._start(lambda log: creases.find_dots(self.P, self.F, cells, cut, 0.0, flat, log, height=h), lambda r: self._dots_done(r, t0))
     def _dots_done(self, r, t0):
-        self.res = r; self.curves = None; self.logmsg(f'dots done in {time.time()-t0:.1f} s'); self.busy(False); self.redraw()
+        self.res = r; self.curves = None; self.logmsg(f'dots done in {time.time()-t0:.1f} s')
+        try: self.logmsg(f'saved dots to {save_dots(r, self.path, self.sp_cube.value(), self.sp_cut.value(), self.chk_flat.isChecked())}')
+        except Exception: self.logmsg(traceback.format_exc())
+        self.busy(False); self.redraw()
 
     def stroke_params(self):
         return dict(W=self.sp_W.value(), L=self.sp_L.value(), K=self.sp_K.value(), align=self.sp_align.value(), agree=self.sp_agree.value(), minlen=int(self.sp_minlen.value()))
