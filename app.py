@@ -76,8 +76,6 @@ TIPS = dict(
     reach="How far ahead, in mm, the next anchor may lie. A gap in the dot row shorter than this does not end the line; longer reaches may jump to another band.",
     pull="How much the line's trend pulls each node toward where the line was heading (0 = node sits on the band alone, 1 = equal say). Smooths dents.",
     wminlen="Lines with fewer nodes than this are dropped and their dots released.",
-    bend="The dots may steer a node only within this angle of the line's heading. A sharper turn is another crease: the heading wins outright and the line ends when it runs out of dots ahead.",
-    powercut="Line power = strength (degrees above the cut) of every dot the line gathered, divided by its node count. A line under this power never existed: its dots are released. 0 = off.",
     snap="Moves each node onto the nearest surface point before drawing, so lines on sharp convex edges are not hidden inside the solid. Judge placement with this on; lifting lines off the surface shifts them sideways.",
 )
 
@@ -85,7 +83,7 @@ TIPS = dict(
 class App(QtWidgets.QMainWindow):
     def __init__(self):
         super().__init__(); self.setWindowTitle('Segmentation tool'); self.resize(1500, 950)
-        self.P = self.F = None; self.path = None; self.res = None; self.curves = None; self.joins = []; self.mesh_t = None
+        self.P = self.F = None; self.path = None; self.res = None; self.curves = None; self.mesh_t = None
         root = QtWidgets.QWidget(); self.setCentralWidget(root); lay = QtWidgets.QHBoxLayout(root)
         self.plotter = QtInteractor(root); lay.addWidget(self.plotter.interactor, 1)
         side = QtWidgets.QVBoxLayout(); lay.addLayout(side, 0)
@@ -116,8 +114,6 @@ class App(QtWidgets.QMainWindow):
         self.sp_look = spin(0.35, 0, 2, 0.05, 2); row(fw, 'Look ahead (mm)', self.sp_look, TIPS['look'])
         self.sp_levp = spin(6.0, 0, 20, 0.5, 1); row(fw, 'Strength power', self.sp_levp, TIPS['levp'])
         self.sp_wminlen = spin(8, 1, 500, 1); row(fw, 'Minimum line length (nodes)', self.sp_wminlen, TIPS['wminlen'])
-        self.sp_bend = spin(45, 5, 180, 5); row(fw, 'Max turn for the dots (deg)', self.sp_bend, TIPS['bend'])
-        self.sp_powercut = spin(3, 0, 1000, 1, 1); row(fw, 'Line power cut', self.sp_powercut, TIPS['powercut'])
         self.w_old = QtWidgets.QWidget(); f2o = QtWidgets.QFormLayout(self.w_old); f2o.setContentsMargins(0, 0, 0, 0); f2.addRow(self.w_old); f2, f2w = f2o, f2
         self.sp_W = spin(0.4, 0.02, 5, 0.05, 2); row(f2, 'Stroke half-width (mm)', self.sp_W, TIPS['W'])
         self.sp_L = spin(1.0, 0.1, 10, 0.1, 2); row(f2, 'Stroke stretch (mm)', self.sp_L, TIPS['L'])
@@ -187,7 +183,7 @@ class App(QtWidgets.QMainWindow):
     def stroke_params(self):
         return dict(W=self.sp_W.value(), L=self.sp_L.value(), K=self.sp_K.value(), align=self.sp_align.value(), agree=self.sp_agree.value(), minlen=int(self.sp_minlen.value()))
     def walk_params(self):
-        return dict(step=self.sp_step.value(), slice=self.sp_slice.value(), reach=self.sp_reach.value(), pull=self.sp_pull.value(), look=self.sp_look.value(), levp=self.sp_levp.value(), minlen=int(self.sp_wminlen.value()), bend=self.sp_bend.value(), powercut=self.sp_powercut.value())
+        return dict(step=self.sp_step.value(), slice=self.sp_slice.value(), reach=self.sp_reach.value(), pull=self.sp_pull.value(), look=self.sp_look.value(), levp=self.sp_levp.value(), minlen=int(self.sp_wminlen.value()))
     def all_params(self):
         return dict(method=self.cb_method.currentText(), **({} if self.cb_method.currentIndex() else self.walk_params()), **({'join_mm': self.sp_G.value(), **self.stroke_params()} if self.cb_method.currentIndex() else {}))
 
@@ -200,7 +196,7 @@ class App(QtWidgets.QMainWindow):
         G = self.sp_G.value()
         self._start(lambda log: (lambda cv: creases.join(cv, G, log=log) if G > 0 else cv)(creases.strokes(self.res, log=log, **sp)), lambda r: self._lines_done(r, t0))
     def _lines_done(self, r, t0):
-        self.curves = r; self.joins = getattr(trace4.run, 'joins', []) if self.cb_method.currentIndex() == 0 else []; self.logmsg(f'lines done in {time.time()-t0:.1f} s'); self.busy(False); self.btn_save.setEnabled(True); self.redraw()
+        self.curves = r; self.logmsg(f'lines done in {time.time()-t0:.1f} s'); self.busy(False); self.btn_save.setEnabled(True); self.redraw()
 
     def redraw(self):
         if self.P is None: return
@@ -229,7 +225,7 @@ class App(QtWidgets.QMainWindow):
         if not self.curves: return
         out = os.path.splitext(self.path)[0]+'_lines.npz'
         prm = dict(cube_mm=self.sp_cube.value(), cut=self.sp_cut.value(), flat=self.chk_flat.isChecked(), **self.all_params())
-        np.savez(out, n=np.array([len(c) for c in self.curves]), pts=np.vstack(self.curves), joins=np.array(self.joins, int).reshape(-1, 4), params=str(prm)); self.logmsg(f'saved {out}')
+        np.savez(out, n=np.array([len(c) for c in self.curves]), pts=np.vstack(self.curves), params=str(prm)); self.logmsg(f'saved {out}')
 
     def dump(self):
         """Everything on screen, to out/debug/<time>/: dots.npz (cube centres, drawn positions, grid), lines.npz (points,
@@ -244,7 +240,7 @@ class App(QtWidgets.QMainWindow):
                 np.savez(os.path.join(d, 'dots.npz'), centres=C, drawn=D, idx=r['idx'][r['line']], N=r['N'][r['line']], turn=r['turn'][r['line']], lo=r['lo'], size=r['size'])
                 prm['dots'] = int(len(C))
             if self.curves:
-                np.savez(os.path.join(d, 'lines.npz'), n=np.array([len(c) for c in self.curves]), pts=np.vstack(self.curves), joins=np.array(getattr(self, 'joins', []), int).reshape(-1, 4)); prm['lines'] = len(self.curves)
+                np.savez(os.path.join(d, 'lines.npz'), n=np.array([len(c) for c in self.curves]), pts=np.vstack(self.curves)); prm['lines'] = len(self.curves)
             with open(os.path.join(d, 'log.txt'), 'w', encoding='utf-8') as f: f.write(self.txt.toPlainText())
             import json
             with open(os.path.join(d, 'settings.json'), 'w', encoding='utf-8') as f: json.dump(prm, f, indent=1)
