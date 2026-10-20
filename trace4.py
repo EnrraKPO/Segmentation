@@ -5,11 +5,12 @@ band = the hill of the across-profile the anchor sits on; node = weighted mean o
 next anchor = strongest dot about one step ahead along the trend of the last nodes, inside the band's width.
 Ends: no dot ahead; anchor/band owned by another line (ended ON that line at its nearest node); uncertain axis.
 
-usage: python trace4.py grid.npz out.npz        env (mm unless noted): STEP 0.087, SLICE 0.17 (half-length of the
+usage: python trace4.py grid.npz out.npz        env (mm unless noted): STEP 0.087, SLICE 0.7 (half-length of the
 slice along the axis), SPHERE 0.7 (radius for the axis read, grows to 3x the band width), WMAX 1.0 (widest band
 half-width looked at), ALIGN 1.5 (axis spread ratio long/wide), TREND 6 (nodes), CONE 45 (deg), MINLEN 8 (nodes),
-PULL 0 (A: weight of the trend's predicted point against the dots' total, 0 = dots only), AFALL 1.0 (B: cubes off the trend's
-centre line at which a candidate's score has fallen to 1/e), ASTR 1.0 (B: exponent on relative strength; 0 = alignment only), OWNED 0.5 (fraction of the band owned by another line that counts as a collision), VALLEY 1.3 (the profile must rise
+PULL 10 (A: weight of the trend's predicted point against the dots' total, 0 = dots only; LOOK 0.35 probes ahead and scales it: dot support
+along the trend vs along the local axis), LEVP 6 (dot say = (strength/line standard)^LEVP, LEVN 6 nodes of memory), AFALL 2.0 (B: cubes off the trend's
+centre line at which a candidate's score has fallen to 1/e), ASTR 0 (B: exponent on relative strength; 0 = alignment only), OWNED 0.5 (fraction of the band owned by another line that counts as a collision), VALLEY 1.3 (the profile must rise
 this much above its running minimum to count as a second hill)"""
 import os, sys, time, numpy as np
 from scipy.spatial import cKDTree
@@ -23,10 +24,20 @@ def walk(X, wgt, N, size, log=print, **kw):
     step = kw.get('step', 0.087)/size; slice_h = kw.get('slice', 0.7)/size; sph0 = kw.get('sphere', 0.7)/size
     wmax = kw.get('wmax', 1.0)/size; align = kw.get('align', 1.5); trend_n = int(kw.get('trend', 6)); cos_cone = np.cos(np.radians(kw.get('cone', 45)))
     reach = kw.get('reach', 0.22)/size   # how far ahead (cubes) the next anchor may lie: a gap in the dot row shorter than this does not end the line
-    pull = kw.get('pull', 1.0); afall = kw.get('afall', 2.0); astr = kw.get('astr', 0.0)   # A: trend weight on the node; B: score falloff (cubes) off the centre line, strength exponent
+    along = kw.get('along', 0.0)/size or reach   # ALONG: falloff (mm) of the along-score around one step; default = reach (the two roles coupled, as before)
+    pull = kw.get('pull', 10.0); afall = kw.get('afall', 2.0); astr = kw.get('astr', 0.0)   # A: trend weight on the node; B: score falloff (cubes) off the centre line, strength exponent
     minlen = int(kw.get('minlen', 8)); owned_frac = kw.get('owned', 0.5); valley = kw.get('valley', 1.3); core_frac = kw.get('core', 0.0); grow = kw.get('grow', 99.0); lead_k = kw.get('lead', 0.0); lead_min = int(kw.get('leadmin', 8)); fringe = kw.get('fringe', 1.0) > 0; ridge = kw.get('ridge', 0.0) > 0; sparse = kw.get('sparse', 0.0); hill = kw.get('hill', 0.0) > 0
+    walk.probe = []
     tree = cKDTree(X); n = len(X); owner = np.full(n, -1); lines = []; node_tree = None; node_owner = np.zeros(0, int); all_nodes = np.zeros((0, 3))
-    stats = dict(no_anchor=0, collision=0, self_hit=0, uncertain=0, short=0, trend_used=0, clipped=0); kept_ends = dict(); diag = []
+    look = kw.get('look', 0.35)/size; lookw = kw.get('lookw', 1.0); lookn = int(kw.get('lookn', 0)); levp = kw.get('levp', 6.0); levn = kw.get('levn', 6.0)   # LEVP: power of the strength/standard curve (0 = off); LEVN: nodes of memory of the standard  # LOOK: how far ahead (mm) the probe corridors run, 0 = off; LOOKW: corridor half-width (cubes)
+    stats = dict(no_anchor=0, collision=0, self_hit=0, uncertain=0, short=0, trend_used=0, clipped=0, look_trend=0, look_dots=0, look_mixed=0); kept_ends = dict(); diag = []
+
+    def support(p, dd):
+        """dot weight in a corridor from point p along heading dd: half a step to LOOK ahead, LOOKW across"""
+        c = np.array(tree.query_ball_point(p+0.5*look*dd, 0.5*look+lookw), int)
+        if len(c) == 0: return 0.0
+        off = X[c]-p; al = off @ dd; ac = np.linalg.norm(off-al[:, None]*dd, axis=1); m = (al >= 0.5*step) & (al <= look) & (ac <= 2*lookw)
+        return float((wgt[c][m]*np.exp(-(ac[m]/lookw)**2)).sum())                  # dots near the corridor's centre line count most
 
     def axis_at(a, radius):
         nb = np.array(tree.query_ball_point(X[a], radius), int)
@@ -86,11 +97,12 @@ def walk(X, wgt, N, size, log=print, **kw):
         if not core.any(): core = sel
         return nb[sel], (hi-lo+1), u, nb[core]
 
-    def node_w(bd):
+    def node_w(bd, level=None):
         """weights of the band's dots for the node. Lead = how far the strongest dots stand above the typical dot of the band
         (0: all alike, ->1: a few tower over the rest). With a clear lead the others are noise and lose their say; with no lead
         every dot counts. LEAD scales how hard the cut follows the lead."""
         w = wgt[bd]; top = w.max()
+        if levp > 0 and level is not None: return np.minimum(w/level, 1.0)**levp   # LEVP: dots below the line's standard lose their say steeply
         if lead_k <= 0 or len(bd) < 4: return w
         lead = 1-np.median(w)/top
         return np.maximum(w-min(lead_k*lead, 0.95)*top, 0)      # the strongest dot always keeps a say
@@ -106,11 +118,11 @@ def walk(X, wgt, N, size, log=print, **kw):
         if band is None: continue
         bd, bw, _, bc = band
         if ((owner[bd] != -1) & (owner[bd] != tid)).mean() > owned_frac: continue      # that line is drawn already
-        w0 = node_w(bc); p0 = (X[bc]*w0[:, None]).sum(0)/w0.sum(); p0 = X[s]+(p0-X[s])-((p0-X[s]) @ h)*h; claimed = list(bd); owner[bd] = tid
+        level0 = float(wgt[bc].max()); w0 = node_w(bc, level0); p0 = (X[bc]*w0[:, None]).sum(0)/w0.sum(); p0 = X[s]+(p0-X[s])-((p0-X[s]) @ h)*h; claimed = list(bd); owner[bd] = tid
         halves = []; back = max(int(2*slice_h/step)+3, 15)
         reasons = []; ends_at = []; halves_w = []
         for sign in (1, -1):
-            nodes = [p0]; d = sign*h; width = bw; widths = []
+            nodes = [p0]; d = sign*h; width = bw; widths = []; level = level0
             while True:
                 # anchor: strongest dot about one step ahead along the trend, within the band's width (own dots allowed:
                 # slices overlap along the line; dots of another line mean a collision)
@@ -121,7 +133,7 @@ def walk(X, wgt, N, size, log=print, **kw):
                     cand = cand[ok]; acd = ac[ok]
                 if len(cand) == 0: stats['no_anchor'] += 1; reasons.append('no_anchor'); ends_at.append((X[a] if 'a' in dir() else q).copy()); break
                 rel = wgt[cand]/wgt[cand].max()                                     # strength relative to the peers in reach
-                ald = al[ok]; score = np.exp(-(acd/afall)**2)*rel**astr*np.exp(-((ald-step)/reach)**2); a = cand[np.argmax(score)]
+                ald = al[ok]; score = np.exp(-(acd/afall)**2)*rel**astr*np.exp(-((ald-step)/along)**2); a = cand[np.argmax(score)]
                 if owner[a] not in (-1, tid):                                          # collision: end on that line
                     j = owner[a]; stats['collision'] += 1; reasons.append('collision'); ends_at.append(X[a].copy()); other = lines[j]; dn = np.linalg.norm(other-X[a], axis=1)
                     if dn.min() <= 0.5*width+1: nodes.append(other[int(dn.argmin())])     # the other line is here: end on it
@@ -138,10 +150,19 @@ def walk(X, wgt, N, size, log=print, **kw):
                     j = int(np.bincount(ow[foreign]).argmax()); stats['collision'] += 1; reasons.append('band_owned'); ends_at.append(X[a].copy()); other = lines[j]; dn = np.linalg.norm(other-X[a], axis=1)
                     if dn.min() <= 0.5*width+1: nodes.append(other[int(dn.argmin())])
                     break
-                wn = node_w(bc); pn = (X[bc]*wn[:, None]).sum(0)/wn.sum(); pn = X[a]+(pn-X[a])-((pn-X[a]) @ ha)*ha   # node: anchor moved across the band only
-                if pull > 0:                                                            # A: the trend's prediction votes too
+                wn = node_w(bc, level); level += ((wn*wgt[bc]).sum()/wn.sum()-level)/levn; pn = (X[bc]*wn[:, None]).sum(0)/wn.sum(); pn = X[a]+(pn-X[a])-((pn-X[a]) @ ha)*ha   # node: anchor moved across the band only
+                if pull > 0 or look > 0:                                                # A: the trend's prediction votes too
                     pred = nodes[-1]+((X[a]-nodes[-1]) @ d)*d; pred = X[a]+(pred-X[a])-((pred-X[a]) @ ha)*ha
-                    pn = (pn+pull*pred)/(1+pull)
+                    f = pull/(1+pull)                                                   # fixed share of the trend's say
+                    if look > 0:                                                        # LOOK: probe ahead; the candidate with dot support ahead of it wins
+                        dl, pl = d, pred
+                        if lookn > 0 and len(nodes) > lookn:                           # LOOKN: probe the trend of the nodes before the last few, which a drift under way has not yet bent
+                            dl = nodes[-4]-nodes[-1-lookn]; dl /= np.linalg.norm(dl)+1e-12; pl = nodes[-4]+((X[a]-nodes[-4]) @ dl)*dl; pl = X[a]+(pl-X[a])-((pl-X[a]) @ ha)*ha
+                        st = support(pl, dl); sa = support(pn, ha)
+                        if st > sa: pred = pl                                           # the long trend wins: the node goes back onto it
+                        if st+sa > 0: f = pull*st/(pull*st+sa); stats['look_trend' if f > 0.8 else 'look_dots' if f < 0.2 else 'look_mixed'] += 1
+                        walk.probe.append((f, st, sa, float(np.linalg.norm(pn-pred))))
+                    pn = (1-f)*pn+f*pred
                 old = np.array(nodes[:-back]) if len(nodes) > back else None
                 if old is not None:
                     dist = np.linalg.norm(old-pn, axis=1); kmin = int(np.argmin(dist))
@@ -199,7 +220,7 @@ def run(res, log=print, **kw):
 def main():
     G, outp = sys.argv[1], sys.argv[2]; g = np.load(G); line = g['line']; size = float(g['size']); cut = float(g['cut']) if 'cut' in g.files else 17.0
     X = (g['idx'][line]+0.5).astype(float); wgt = (np.maximum(g['turn'][line]-cut, 0)+1e-3)**env('WPOW', 1.0); N = g['N'][line]   # WPOW: how aggressively strong dots outweigh weak ones
-    kw = {k.lower(): env(k, d) for k, d in [('STEP', 0.087), ('SLICE', 0.7), ('SPHERE', 0.7), ('WMAX', 1.0), ('ALIGN', 1.5), ('TREND', 6), ('CONE', 45), ('MINLEN', 8), ('OWNED', 0.5), ('VALLEY', 1.3), ('CORE', 0.0), ('GROW', 99), ('PULL', 1.0), ('AFALL', 2.0), ('ASTR', 0.0), ('HILL', 0), ('REACH', 0.22), ('LEAD', 0.0), ('LEADMIN', 8), ('FRINGE', 1), ('RIDGE', 0), ('SPARSE', 0)]}
+    kw = {k.lower(): env(k, d) for k, d in [('STEP', 0.087), ('SLICE', 0.7), ('SPHERE', 0.7), ('WMAX', 1.0), ('ALIGN', 1.5), ('TREND', 6), ('CONE', 45), ('MINLEN', 8), ('OWNED', 0.5), ('VALLEY', 1.3), ('CORE', 0.0), ('GROW', 99), ('PULL', 10.0), ('AFALL', 2.0), ('ASTR', 0.0), ('HILL', 0), ('REACH', 0.22), ('ALONG', 0.0), ('LOOK', 0.35), ('LOOKW', 1.0), ('LOOKN', 0), ('LEVP', 6.0), ('LEVN', 6), ('LEAD', 0.0), ('LEADMIN', 8), ('FRINGE', 1), ('RIDGE', 0), ('SPARSE', 0)]}
     t0 = time.time(); lines = walk_all(X, wgt, N, size, **kw) if env('PAR', 1) > 0 else walk(X, wgt, N, size, **kw)[0]; print(f'{time.time()-t0:.1f} s')
     cv = [g['lo']+l*size for l in lines]
     np.savez(outp, n=np.array([len(c) for c in cv]), pts=np.vstack(cv) if cv else np.zeros((0, 3))); print('saved', outp)

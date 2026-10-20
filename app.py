@@ -43,6 +43,8 @@ TIPS = dict(
     method="Anchored walk: the new line stage (see docs/brief_anchored_walk.md). Thick strokes: the previous method, kept for comparison.",
     step="Distance between nodes along the line, in mm. About one cube.",
     slice="Half-length, in mm, of the slice across the band that each node averages. Longer = smoother nodes, but a long slice blurs tight corners.",
+    look="Probe length in mm, 0 = off. Before each node, two corridors this long are probed for dots: one continuing the trend, one along the local dot axis. Dot support ahead scales the trend pull: the trend wins where the dots continue along it, the dots win where the trend leads onto bare surface.",
+    levp="0 = off. Each line keeps a running standard, the typical strength of the dots it follows. A dot's say is (strength / standard) to this power, capped at 1: with power 6 a dot 10 % below the standard has half a say, one 50 % below almost none. Weak dots lead only where nothing stronger is there.",
     reach="How far ahead, in mm, the next anchor may lie. A gap in the dot row shorter than this does not end the line; longer reaches may jump to another band.",
     pull="How much the line's trend pulls each node toward where the line was heading (0 = node sits on the band alone, 1 = equal say). Smooths dents.",
     wminlen="Lines with fewer nodes than this are dropped and their dots released.",
@@ -79,7 +81,9 @@ class App(QtWidgets.QMainWindow):
         self.sp_step = spin(0.087, 0.01, 2, 0.01, 3); row(fw, 'Step (mm)', self.sp_step, TIPS['step'])
         self.sp_slice = spin(0.7, 0.05, 5, 0.05, 2); row(fw, 'Slice half-length (mm)', self.sp_slice, TIPS['slice'])
         self.sp_reach = spin(0.22, 0.02, 3, 0.02, 2); row(fw, 'Reach (mm)', self.sp_reach, TIPS['reach'])
-        self.sp_pull = spin(1.0, 0, 5, 0.1, 1); row(fw, 'Trend pull', self.sp_pull, TIPS['pull'])
+        self.sp_pull = spin(10.0, 0, 20, 0.1, 1); row(fw, 'Trend pull', self.sp_pull, TIPS['pull'])
+        self.sp_look = spin(0.35, 0, 2, 0.05, 2); row(fw, 'Look ahead (mm)', self.sp_look, TIPS['look'])
+        self.sp_levp = spin(6.0, 0, 20, 0.5, 1); row(fw, 'Strength power', self.sp_levp, TIPS['levp'])
         self.sp_wminlen = spin(8, 1, 500, 1); row(fw, 'Minimum line length (nodes)', self.sp_wminlen, TIPS['wminlen'])
         self.w_old = QtWidgets.QWidget(); f2o = QtWidgets.QFormLayout(self.w_old); f2o.setContentsMargins(0, 0, 0, 0); f2.addRow(self.w_old); f2, f2w = f2o, f2
         self.sp_W = spin(0.4, 0.02, 5, 0.05, 2); row(f2, 'Stroke half-width (mm)', self.sp_W, TIPS['W'])
@@ -133,7 +137,7 @@ class App(QtWidgets.QMainWindow):
     def stroke_params(self):
         return dict(W=self.sp_W.value(), L=self.sp_L.value(), K=self.sp_K.value(), align=self.sp_align.value(), agree=self.sp_agree.value(), minlen=int(self.sp_minlen.value()))
     def walk_params(self):
-        return dict(step=self.sp_step.value(), slice=self.sp_slice.value(), reach=self.sp_reach.value(), pull=self.sp_pull.value(), minlen=int(self.sp_wminlen.value()))
+        return dict(step=self.sp_step.value(), slice=self.sp_slice.value(), reach=self.sp_reach.value(), pull=self.sp_pull.value(), look=self.sp_look.value(), levp=self.sp_levp.value(), minlen=int(self.sp_wminlen.value()))
     def all_params(self):
         return dict(method=self.cb_method.currentText(), **({} if self.cb_method.currentIndex() else self.walk_params()), **({'join_mm': self.sp_G.value(), **self.stroke_params()} if self.cb_method.currentIndex() else {}))
 
