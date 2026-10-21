@@ -390,3 +390,28 @@ that inconsistency. Test spots: shield facet (dump 20261020_144432, view centre 
 (20261020_163631, 194.72,123.34,169.49), notch rim (20261020_165259, rim point 219.51,167.43,165.39).
 Helpers in the scratchpad of this session: siblings.py, kinks.py, follow.py (node-by-node record), rewalk_view.py,
 strong_trail.py, held_check.py, bend_sweep.py, powerview.py.
+
+## Session notes 2026-10-21: fine refinement of one line (scratch only, no project code changed)
+
+Goal agreed: after the walk, refine each line at a much finer resolution; the eye sees the math and nothing else.
+Spot: the notch rim line (dump 20261020_144432, line nearest 219.51,167.43,165.39), resampled to 0.02 mm.
+
+What held up (scratch `refine_planes5.py`, this session's scratchpad):
+- Per node, a slice across the line walked along the surface at 0.0087 mm steps; the facing read as the render blends
+  it (vertex normals interpolated; corners must be merged first or the blend is a no-op).
+- Each side's plane = weighted average of position and facing on that side, every weight a smooth function of
+  distance (rises in from the node, fades out) and of distance along the line; the node = where the two planes cross.
+  Repeated from the new point until it settles (3-6 passes). Back onto the surface by a push along the planes' mean
+  facing, never nearest-point (a coin toss inside a corner).
+- Result: a continuous line on the crease, 1.5 s per 600 nodes, no jumps between neighbouring points; the step at
+  the wall dip shows as a soft S. Renders `rim23b_*`.
+
+What failed, and the lesson: every version with a hard edge (hump cut-off, strongest-bend anchor, peak of the
+blurred bend, plane patches of N steps, nearest-point drop) produced jumps of 0.05 mm between points 0.02 mm apart.
+The surface is continuous; a jump is always the measurement's fault. No cut-offs, no argmax, no boxes, anywhere.
+
+Open: the clean curve through the measurements (`fit_joints.py`: joints where the ironed path bends, one spline).
+Fitted tight it keeps the triangle-scale ripples; loose, it loses the step. On this line the step and the ripples
+have the same size and sharpness along the path; the eye tells them apart by the wall's dip above, which the line
+does not carry. No rule for that yet. The user ended the session confused by the dots; next time start by showing
+only the measured red line on the smooth-shaded surface (`view_smooth.py`), nothing else.
