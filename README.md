@@ -415,3 +415,11 @@ Fitted tight it keeps the triangle-scale ripples; loose, it loses the step. On t
 have the same size and sharpness along the path; the eye tells them apart by the wall's dip above, which the line
 does not carry. No rule for that yet. The user ended the session confused by the dots; next time start by showing
 only the measured red line on the smooth-shaded surface (`view_smooth.py`), nothing else.
+
+**Integrated (2026-10-21, late):** `refine.py` (stage 3: `refine_all`, `refine_line`, `fit_curve`, `nearest_line`) and
+app group "3. Refine lines": a point field, "Refine one line (nearest the point)", "Refine all lines", curve
+tolerance. Refined curves drawn red over the walk's blue, corners black, joints white; Save writes refined curves in
+place of their walk lines; Dump writes refined.npz. Defaults: planes read in 0.06 / out 0.2 / along 0.05 mm, curve
+tolerance 0.05 mm. Verified: the module reproduces the scratch curve on the rim line exactly (11 joints, 1 corner).
+Speed: ~24 s per line (trimesh closest-point queries in the slice walk); "Refine all" on the full orc is hours. Not
+yet judged on any other line.

@@ -1,6 +1,9 @@
 """Segmentation tool. Two stages, each run on its own and kept:
   1. Find dots   : cubes over the surface, each reading its own triangle's facing; a dot where the facing shift
                    changes sharply from one cube to the next (creases.find_dots). Parameters: cube size (mm), cut.
+  3. Refine lines: each line moved onto the crease as the surface shows it, from the mesh itself at 0.02 mm (refine.py:
+                   two planes read on either side with smooth weights, the line where they cross), then drawn as a
+                   clean curve with a joint where the crease really bends and a corner where two lines meet.
   2. Build lines : anchored walk (trace4.walk): from the strongest free dot, read the band of connected dots in a thin
                    slice across it, place a node, step along the line's trend to the next anchor; lines end on other
                    lines. Parameters in mm: step, slice, reach; trend pull; min length. The old thick-stroke method
@@ -12,7 +15,7 @@ from PySide6 import QtCore, QtWidgets
 import pyvista as pv
 from pyvistaqt import QtInteractor
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-import creases, trace4
+import creases, trace4, refine
 DOTS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'out', 'dots')   # saved dot sets; last.json maps model name -> last file
 
 
@@ -76,6 +79,8 @@ TIPS = dict(
     reach="How far ahead, in mm, the next anchor may lie. A gap in the dot row shorter than this does not end the line; longer reaches may jump to another band.",
     pull="How much the line's trend pulls each node toward where the line was heading (0 = node sits on the band alone, 1 = equal say). Smooths dents.",
     wminlen="Lines with fewer nodes than this are dropped and their dots released.",
+    rpoint="A point on the model (x,y,z in mm, e.g. from a debug dump). 'Refine one line' takes the line passing nearest it.",
+    rtol="How far the clean curve may stray from the measured line before it gets another control point, in mm. 0.05 gives about one control point per millimetre on the orc rim; smaller keeps more detail and more wobble.",
     snap="Moves each node onto the nearest surface point before drawing, so lines on sharp convex edges are not hidden inside the solid. Judge placement with this on; lifting lines off the surface shifts them sideways.",
 )
 
@@ -83,7 +88,7 @@ TIPS = dict(
 class App(QtWidgets.QMainWindow):
     def __init__(self):
         super().__init__(); self.setWindowTitle('Segmentation tool'); self.resize(1500, 950)
-        self.P = self.F = None; self.path = None; self.res = None; self.curves = None; self.mesh_t = None
+        self.P = self.F = None; self.path = None; self.res = None; self.curves = None; self.refined = None; self.mesh_t = None
         root = QtWidgets.QWidget(); self.setCentralWidget(root); lay = QtWidgets.QHBoxLayout(root)
         self.plotter = QtInteractor(root); lay.addWidget(self.plotter.interactor, 1)
         side = QtWidgets.QVBoxLayout(); lay.addLayout(side, 0)
@@ -126,6 +131,13 @@ class App(QtWidgets.QMainWindow):
         self.cb_method.currentIndexChanged.connect(self._method_changed); self._method_changed()
         side.addWidget(g2)
 
+        g3 = QtWidgets.QGroupBox('3. Refine lines'); f3 = QtWidgets.QFormLayout(g3)
+        self.ed_point = QtWidgets.QLineEdit('219.51,167.43,165.39'); row(f3, 'Point near a line (x,y,z)', self.ed_point, TIPS['rpoint'])
+        self.sp_rtol = spin(0.05, 0.01, 0.5, 0.01, 2); row(f3, 'Curve tolerance (mm)', self.sp_rtol, TIPS['rtol'])
+        self.btn_refine1 = QtWidgets.QPushButton('Refine one line (nearest the point)'); self.btn_refine1.clicked.connect(lambda: self.refine_lines(True)); self.btn_refine1.setEnabled(False); f3.addRow(self.btn_refine1)
+        self.btn_refine = QtWidgets.QPushButton('Refine all lines (slow: ~25 s per line)'); self.btn_refine.clicked.connect(lambda: self.refine_lines(False)); self.btn_refine.setEnabled(False); f3.addRow(self.btn_refine)
+        side.addWidget(g3)
+
         self.chk_dots = QtWidgets.QCheckBox('Show dots'); self.chk_dots.setChecked(True); self.chk_dots.stateChanged.connect(self.redraw); side.addWidget(self.chk_dots)
         self.chk_curves = QtWidgets.QCheckBox('Show lines'); self.chk_curves.setChecked(True); self.chk_curves.stateChanged.connect(self.redraw); side.addWidget(self.chk_curves)
         self.chk_snap = QtWidgets.QCheckBox('Draw lines on the surface (a few seconds)'); self.chk_snap.setChecked(True); self.chk_snap.setToolTip(TIPS['snap']); self.chk_snap.stateChanged.connect(self.redraw); side.addWidget(self.chk_snap)
@@ -138,14 +150,14 @@ class App(QtWidgets.QMainWindow):
     def _method_changed(self, *_):
         walk = self.cb_method.currentIndex() == 0; self.w_walk.setVisible(walk); self.w_old.setVisible(not walk)
     def busy(self, b):
-        self.btn_dots.setEnabled(not b and self.P is not None); self.btn_load_dots.setEnabled(not b and self.P is not None); self.btn_lines.setEnabled(not b and self.res is not None)
+        self.btn_dots.setEnabled(not b and self.P is not None); self.btn_load_dots.setEnabled(not b and self.P is not None); self.btn_lines.setEnabled(not b and self.res is not None); self.btn_refine1.setEnabled(not b and bool(self.curves)); self.btn_refine.setEnabled(not b and bool(self.curves))
 
     def load(self):
         path, _ = QtWidgets.QFileDialog.getOpenFileName(self, 'Open STL', '', 'Meshes (*.stl *.obj *.ply *.3mf)')
         if not path: return
         try: self.P, self.F = load_mesh(path)
         except Exception as ex: QtWidgets.QMessageBox.critical(self, 'Load failed', str(ex)); return
-        self.path = path; self.lbl_file.setText(os.path.basename(path)); self.res = self.curves = None; self.mesh_t = None; self.btn_save.setEnabled(False)
+        self.path = path; self.lbl_file.setText(os.path.basename(path)); self.res = self.curves = self.refined = None; self.mesh_t = None; self.btn_save.setEnabled(False)
         h = float((self.P.max(0)-self.P.min(0)).max())
         e = np.linalg.norm(self.P[self.F[:, 1]]-self.P[self.F[:, 0]], axis=1)
         self.logmsg(f'loaded {os.path.basename(path)}: {len(self.F)} faces, height {h:.1f} mm, typical triangle edge {np.median(e):.3f} mm')
@@ -156,7 +168,7 @@ class App(QtWidgets.QMainWindow):
     def _use_dots(self, p):
         try: res, cube, flat, model = load_dots(p)
         except Exception as ex: self.logmsg(f'could not load dots from {p}: {ex}'); return
-        self.res = res; self.curves = None; self.btn_save.setEnabled(False); self.sp_cube.setValue(cube); self.sp_cut.setValue(res['cut']); self.chk_flat.setChecked(flat)
+        self.res = res; self.curves = self.refined = None; self.btn_save.setEnabled(False); self.sp_cube.setValue(cube); self.sp_cut.setValue(res['cut']); self.chk_flat.setChecked(flat)
         self.logmsg(f'loaded {len(res["idx"])} dots from {os.path.basename(p)} (cube {cube:g} mm, cut {res["cut"]:g}, {"flat" if flat else "blended"})')
 
     def load_dots(self):
@@ -175,7 +187,7 @@ class App(QtWidgets.QMainWindow):
         self.logmsg(f'--- find dots: cube={size} mm ({cells} cells over {h:.1f} mm), cut={cut}, flat={flat}'); t0 = time.time()
         self._start(lambda log: creases.find_dots(self.P, self.F, cells, cut, 0.0, flat, log, height=h), lambda r: self._dots_done(r, t0))
     def _dots_done(self, r, t0):
-        self.res = r; self.curves = None; self.logmsg(f'dots done in {time.time()-t0:.1f} s')
+        self.res = r; self.curves = self.refined = None; self.logmsg(f'dots done in {time.time()-t0:.1f} s')
         try: self.logmsg(f'saved dots to {save_dots(r, self.path, self.sp_cube.value(), self.sp_cut.value(), self.chk_flat.isChecked())}')
         except Exception: self.logmsg(traceback.format_exc())
         self.busy(False); self.redraw()
@@ -196,7 +208,33 @@ class App(QtWidgets.QMainWindow):
         G = self.sp_G.value()
         self._start(lambda log: (lambda cv: creases.join(cv, G, log=log) if G > 0 else cv)(creases.strokes(self.res, log=log, **sp)), lambda r: self._lines_done(r, t0))
     def _lines_done(self, r, t0):
-        self.curves = r; self.logmsg(f'lines done in {time.time()-t0:.1f} s'); self.busy(False); self.btn_save.setEnabled(True); self.redraw()
+        self.curves = r; self.refined = None; self.logmsg(f'lines done in {time.time()-t0:.1f} s'); self.busy(False); self.btn_save.setEnabled(True); self.redraw()
+
+    def refine_lines(self, one):
+        """stage 3: refine.refine_all on one line (nearest the point) or all; result kept in self.refined (dict of lists)"""
+        if not self.curves: return
+        tol = self.sp_rtol.value(); only = None
+        if one:
+            try: p = [float(v) for v in self.ed_point.text().split(',')]; only = refine.nearest_line(self.curves, p)
+            except Exception: self.logmsg('point must be x,y,z'); return
+        self.logmsg(f'--- refine {"line "+str(only) if one else "all lines"}: tol={tol}'); t0 = time.time()
+        self._start(lambda log: refine.refine_all(self.curves, self.P, self.F, log=log, only=only, tol=tol), lambda r: self._refine_done(r, t0))
+    def _refine_done(self, r, t0):
+        if self.refined is not None and len(r['index']) == 1:                       # one refined line joins those already refined
+            for k in ('lines', 'measured', 'corners', 'joints'):
+                self.refined[k] = [v for v, i in zip(self.refined[k], self.refined['index']) if i not in r['index']]+r[k]
+            self.refined['index'] = [i for i in self.refined['index'] if i not in r['index']]+r['index']
+        else: self.refined = r
+        self.logmsg(f'refined in {time.time()-t0:.1f} s; {len(self.refined["index"])} refined lines held'); self.busy(False); self.redraw()
+
+    def _draw_lines(self, curves, color, width):
+        pts = np.vstack(curves)
+        if self.chk_snap.isChecked():
+            if self.mesh_t is None: self.mesh_t = trimesh.Trimesh(self.P, self.F, process=False)
+            Cq, dq, tq = trimesh.proximity.closest_point(self.mesh_t, pts); pts = Cq+0.01*self.mesh_t.face_normals[tq]
+        n = [len(c) for c in curves]; off = np.cumsum([0]+n[:-1])
+        cells = np.concatenate([np.r_[k, np.arange(o, o+k)] for k, o in zip(n, off)])
+        self.plotter.add_mesh(pv.PolyData(pts, lines=cells), color=color, line_width=width)
 
     def redraw(self):
         if self.P is None: return
@@ -211,13 +249,12 @@ class App(QtWidgets.QMainWindow):
             self.plotter.add_mesh(d, scalars='fold (deg)', cmap='plasma', clim=(float(self.res['cut']), hi), point_size=5, render_points_as_spheres=True,
                                   scalar_bar_args=dict(title='dot strength (deg)', vertical=True, position_x=0.88, position_y=0.3, height=0.4, width=0.06))
         if self.curves and self.chk_curves.isChecked():
-            pts = np.vstack(self.curves)
-            if self.chk_snap.isChecked():
-                if self.mesh_t is None: self.mesh_t = trimesh.Trimesh(self.P, self.F, process=False)
-                Cq, dq, tq = trimesh.proximity.closest_point(self.mesh_t, pts); pts = Cq+0.01*self.mesh_t.face_normals[tq]
-            n = [len(c) for c in self.curves]; off = np.cumsum([0]+n[:-1])
-            cells = np.concatenate([np.r_[k, np.arange(o, o+k)] for k, o in zip(n, off)])
-            self.plotter.add_mesh(pv.PolyData(pts, lines=cells), color='blue', line_width=3)
+            self._draw_lines(self.curves, 'blue', 3)
+            if self.refined is not None and self.refined['lines']:
+                self._draw_lines([c for c in self.refined['lines'] if len(c) > 1], 'red', 4)   # refined curves over the walk's lines
+                cp = [c for c in self.refined['corners'] if len(c)]; jp = [j for j in self.refined['joints'] if len(j)]
+                if cp: self.plotter.add_mesh(pv.PolyData(np.vstack(cp)), color='black', point_size=10, render_points_as_spheres=True)
+                if jp: self.plotter.add_mesh(pv.PolyData(np.vstack(jp)), color='white', point_size=8, render_points_as_spheres=True)
         if cam is not None and had: self.plotter.camera_position = cam
         else: self.plotter.reset_camera()
 
@@ -225,7 +262,11 @@ class App(QtWidgets.QMainWindow):
         if not self.curves: return
         out = os.path.splitext(self.path)[0]+'_lines.npz'
         prm = dict(cube_mm=self.sp_cube.value(), cut=self.sp_cut.value(), flat=self.chk_flat.isChecked(), **self.all_params())
-        np.savez(out, n=np.array([len(c) for c in self.curves]), pts=np.vstack(self.curves), params=str(prm)); self.logmsg(f'saved {out}')
+        cv = list(self.curves)
+        if self.refined is not None:                                                  # refined curves replace their walk lines
+            for i, c in zip(self.refined['index'], self.refined['lines']): cv[i] = c
+            prm['refined'] = len(self.refined['index']); prm['refine_tol'] = self.sp_rtol.value()
+        np.savez(out, n=np.array([len(c) for c in cv]), pts=np.vstack(cv), params=str(prm)); self.logmsg(f'saved {out} ({prm.get("refined", 0)} refined lines)')
 
     def dump(self):
         """Everything on screen, to out/debug/<time>/: dots.npz (cube centres, drawn positions, grid), lines.npz (points,
@@ -241,6 +282,9 @@ class App(QtWidgets.QMainWindow):
                 prm['dots'] = int(len(C))
             if self.curves:
                 np.savez(os.path.join(d, 'lines.npz'), n=np.array([len(c) for c in self.curves]), pts=np.vstack(self.curves)); prm['lines'] = len(self.curves)
+            if self.refined is not None and self.refined['lines']:
+                r_ = self.refined; np.savez(os.path.join(d, 'refined.npz'), n=np.array([len(c) for c in r_['lines']]), pts=np.vstack(r_['lines']), index=np.array(r_['index']),
+                                            nm=np.array([len(c) for c in r_['measured']]), measured=np.vstack(r_['measured'])); prm['refined'] = len(r_['index']); prm['refine_tol'] = self.sp_rtol.value()
             with open(os.path.join(d, 'log.txt'), 'w', encoding='utf-8') as f: f.write(self.txt.toPlainText())
             import json
             with open(os.path.join(d, 'settings.json'), 'w', encoding='utf-8') as f: json.dump(prm, f, indent=1)
