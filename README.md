@@ -528,3 +528,13 @@ Open for tomorrow: write the fine walk settings and the end-line avoidance into 
   for the pairs instead of pickling, no gain (the cost is the maths under 32-core memory contention: 32 us per pair in
   parallel against 4.4 alone, `clip_cost.py`); clipping in 16k-pair pieces inside each worker, 30 -> 24 s. Left for
   later: a leaner clipping with fewer working arrays. Machine timings vary by a third between runs today.
+- **Summit dots, tried and dropped** (`scratch/20261022_summit/`). The span (turn over two cubes) blurs a soft bend spread
+  over several cubes, and lowering the cut lets smooth curvature through. Two tests of "is the cube at the summit of a
+  bend": (1) `summit_test.py`: rise = rate here minus the mean rate R cubes either side along the across direction; at
+  R = 2, 3 the range is shorter than a triangle (0.41 mm, ~5 cubes), so every triangle edge is a summit and the dots look
+  like the span's (`out/summit_*`, `out/summit_compare.png`). (2) `paint_test.py`, the user's rule: paint outward from
+  each cube over the surface; stop where the arrow's change turns against the trend of the changes so far; bend = the
+  largest angle between the region's arrows; dot when bend >= cut and the cube's arrow is halfway between the extremes.
+  At cuts 17 and 45 it fills every rounded surface wider than the walk (`out/paint_*`, `out/paint45_*`): a round surface
+  turns steadily, so no shift stops the walk, and every cube on it is halfway. A summit needs the turn concentrated near
+  the cube, not merely halfway. User: drop it, keep the span dots.
