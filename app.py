@@ -42,13 +42,13 @@ def pick_line(plotter, act_mesh, drawn, x, y, tol=0.006, depth_mm=0.5):
 DOTS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'out', 'dots')   # saved dot sets; last.json maps model name -> last file
 
 
-def save_dots(res, model, cube, cut, flat):
+def save_dots(res, model, cube, cut, flat, blend=True):
     """Keep only the dots (cubes above the cut): idx, N, turn, plus lo, size, cut and the settings. Written to out/dots/
-    as <model>_<cube>mm_cut<cut>[_blend]_<time>.npz and noted as the last set for this model."""
+    as <model>_<cube>mm_cut<cut>[_blend][_nearest]_<time>.npz and noted as the last set for this model."""
     import json
     os.makedirs(DOTS_DIR, exist_ok=True); m = res['line']; base = os.path.splitext(os.path.basename(model))[0]
-    name = f'{base}_{cube:g}mm_cut{cut:g}{"" if flat else "_blend"}_{time.strftime("%Y%m%d_%H%M%S")}.npz'; path = os.path.join(DOTS_DIR, name)
-    np.savez(path, idx=res['idx'][m], N=res['N'][m], turn=res['turn'][m], lo=res['lo'], size=res['size'], cut=res['cut'], cube=cube, flat=flat, model=model)
+    name = f'{base}_{cube:g}mm_cut{cut:g}{"" if flat else "_blend"}{"" if blend else "_nearest"}_{time.strftime("%Y%m%d_%H%M%S")}.npz'; path = os.path.join(DOTS_DIR, name)
+    np.savez(path, idx=res['idx'][m], N=res['N'][m], turn=res['turn'][m], lo=res['lo'], size=res['size'], cut=res['cut'], cube=cube, flat=flat, blend=blend, model=model)
     lj = os.path.join(DOTS_DIR, 'last.json'); last = json.load(open(lj)) if os.path.exists(lj) else {}
     last[os.path.basename(model)] = name; json.dump(last, open(lj, 'w'), indent=1)
     return path
@@ -58,7 +58,7 @@ def load_dots(path):
     """A saved dot set back into the res dict the line stage reads (every stored cube is a dot)."""
     z = np.load(path, allow_pickle=True); k = len(z['idx'])
     res = dict(idx=z['idx'], N=z['N'], turn=z['turn'], line=np.ones(k, bool), lo=z['lo'], size=float(z['size']), cut=float(z['cut']))
-    return res, float(z['cube']), bool(z['flat']), str(z['model'])
+    return res, float(z['cube']), bool(z['flat']), str(z['model']), bool(z['blend']) if 'blend' in z.files else False   # sets saved before 2026-10-22 took the nearest triangle
 
 
 def last_dots(model):
@@ -87,6 +87,7 @@ TIPS = dict(
     cells="Edge of the cubes laid over the surface, in mm. Should be a few times smaller than the model's triangles but not far below them (orc: 0.41 mm triangles, 0.087 mm cubes; leotard: 0.072 mm triangles, 0.050 mm cubes). Halving it gives four times the cubes and the time.",
     cut="How much the facing shift must change from one cube to the next for the cube to be a dot. Measured on the orc: plate edges ~80, nail edges ~40, skin wrinkles 18-22, soft toe flanks 8-15, flat skin 2-5. 17 keeps creases and drops soft forms.",
     flat="On: the cube reads the facing of the flat triangle under it, the surface the print has. Off: the render's blended facing, which spreads every fold over the neighbouring triangles and hides faint creases.",
+    blend="On: a cube holding several triangles takes their facings blended by the area each covers inside the cube, so the arrow changes gradually as a crease crosses from one cube to the next. Off: the cube takes the one triangle nearest its centre.",
     W="Half the thickness of the stroke laid over the dots, in mm. Dots within this distance sideways belong to the stroke. 0.4 covers the band a crease makes at 0.087 mm cubes; much larger merges neighbouring parallel creases into one.",
     G="How far a stroke end is extended to meet another stroke: at a corner (two ends whose headings cross), across a gap (two ends facing each other) or into the side of another stroke. 0 = no joining.",
     L="How far ahead and behind the stroke looks, in mm, when deciding its position and heading. Longer = smoother line, but a long straight stretch cuts corners on tight curves. 1.0 worked on nail rings and seams.",
@@ -217,6 +218,7 @@ class App(QtWidgets.QMainWindow):
         self.sp_cube = spin(0.087, 0.01, 5, 0.01, 3); row(f1, 'Cube size (mm)', self.sp_cube, TIPS['cells'])
         self.sp_cut = spin(17, 1, 90, 1); row(f1, 'Cut (deg)', self.sp_cut, TIPS['cut'])
         self.chk_flat = QtWidgets.QCheckBox("Read each triangle's own facing (no corner blending)"); self.chk_flat.setChecked(True); self.chk_flat.setToolTip(TIPS['flat']); f1.addRow(self.chk_flat)
+        self.chk_blend = QtWidgets.QCheckBox('Blend the triangles inside a cube by area'); self.chk_blend.setChecked(True); self.chk_blend.setToolTip(TIPS['blend']); f1.addRow(self.chk_blend)
         self.btn_dots = QtWidgets.QPushButton('Find dots'); self.btn_dots.clicked.connect(self.find_dots); self.btn_dots.setEnabled(False); f1.addRow(self.btn_dots)
         self.btn_load_dots = QtWidgets.QPushButton('Load saved dots…'); self.btn_load_dots.clicked.connect(self.load_dots); self.btn_load_dots.setEnabled(False); self.btn_load_dots.setToolTip('Dot sets are saved to out/dots/ every time Find dots finishes; opening a model loads its last set by itself.'); f1.addRow(self.btn_load_dots)
         side.addWidget(g1)
@@ -284,10 +286,10 @@ class App(QtWidgets.QMainWindow):
         self.busy(False); self.redraw()
 
     def _use_dots(self, p):
-        try: res, cube, flat, model = load_dots(p)
+        try: res, cube, flat, model, blend = load_dots(p)
         except Exception as ex: self.logmsg(f'could not load dots from {p}: {ex}'); return
-        self.res = res; self.curves = self.refined = None; self.btn_save.setEnabled(False); self.sp_cube.setValue(cube); self.sp_cut.setValue(res['cut']); self.chk_flat.setChecked(flat)
-        self.logmsg(f'loaded {len(res["idx"])} dots from {os.path.basename(p)} (cube {cube:g} mm, cut {res["cut"]:g}, {"flat" if flat else "blended"})')
+        self.res = res; self.curves = self.refined = None; self.btn_save.setEnabled(False); self.sp_cube.setValue(cube); self.sp_cut.setValue(res['cut']); self.chk_flat.setChecked(flat); self.chk_blend.setChecked(blend)
+        self.logmsg(f'loaded {len(res["idx"])} dots from {os.path.basename(p)} (cube {cube:g} mm, cut {res["cut"]:g}, {"flat" if flat else "blended"}, {"triangles blended in the cube" if blend else "nearest triangle"})')
 
     def load_dots(self):
         os.makedirs(DOTS_DIR, exist_ok=True)
@@ -300,13 +302,13 @@ class App(QtWidgets.QMainWindow):
     def failed(self, msg): self.logmsg(msg); self.busy(False)
 
     def find_dots(self):
-        size, cut, flat = self.sp_cube.value(), self.sp_cut.value(), self.chk_flat.isChecked()
+        size, cut, flat, blend = self.sp_cube.value(), self.sp_cut.value(), self.chk_flat.isChecked(), self.chk_blend.isChecked()
         h = float((self.P.max(0)-self.P.min(0)).max()); cells = max(1, int(round(h/size)))
-        self.logmsg(f'--- find dots: cube={size} mm ({cells} cells over {h:.1f} mm), cut={cut}, flat={flat}'); t0 = time.time()
-        self._start(lambda log: creases.find_dots(self.P, self.F, cells, cut, 0.0, flat, log, height=h), lambda r: self._dots_done(r, t0))
+        self.logmsg(f'--- find dots: cube={size} mm ({cells} cells over {h:.1f} mm), cut={cut}, flat={flat}, blend={blend}'); t0 = time.time()
+        self._start(lambda log: creases.find_dots(self.P, self.F, cells, cut, 0.0, flat, log, height=h, blend=blend), lambda r: self._dots_done(r, t0))
     def _dots_done(self, r, t0):
         self.res = r; self.curves = self.refined = None; self.logmsg(f'dots done in {time.time()-t0:.1f} s')
-        try: self.logmsg(f'saved dots to {save_dots(r, self.path, self.sp_cube.value(), self.sp_cut.value(), self.chk_flat.isChecked())}')
+        try: self.logmsg(f'saved dots to {save_dots(r, self.path, self.sp_cube.value(), self.sp_cut.value(), self.chk_flat.isChecked(), self.chk_blend.isChecked())}')
         except Exception: self.logmsg(traceback.format_exc())
         self.busy(False); self.redraw()
 
@@ -422,7 +424,7 @@ class App(QtWidgets.QMainWindow):
     def save(self):
         if not self.curves: return
         out = os.path.splitext(self.path)[0]+'_lines.npz'
-        prm = dict(cube_mm=self.sp_cube.value(), cut=self.sp_cut.value(), flat=self.chk_flat.isChecked(), **self.all_params())
+        prm = dict(cube_mm=self.sp_cube.value(), cut=self.sp_cut.value(), flat=self.chk_flat.isChecked(), blend=self.chk_blend.isChecked(), **self.all_params())
         cv = list(self.curves)
         if self.refined is not None:                                                  # refined lines replace their walk lines (a line refined into
             done = sorted(set(self.refined['index']))                                 # several pieces gives several lines; one into none is dropped)
@@ -435,7 +437,7 @@ class App(QtWidgets.QMainWindow):
         run lengths), log.txt, settings.json (parameters, model, camera) and viewport.png. Works with any stage done."""
         d = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'out', 'debug', time.strftime('%Y%m%d_%H%M%S')); os.makedirs(d, exist_ok=True)
         try:
-            prm = dict(model=self.path, faces=None if self.F is None else int(len(self.F)), cube_mm=self.sp_cube.value(), cut=self.sp_cut.value(), flat=self.chk_flat.isChecked(),
+            prm = dict(model=self.path, faces=None if self.F is None else int(len(self.F)), cube_mm=self.sp_cube.value(), cut=self.sp_cut.value(), flat=self.chk_flat.isChecked(), blend=self.chk_blend.isChecked(),
                        **self.all_params(), show_dots=self.chk_dots.isChecked(), flat_shading=self.chk_flatshade.isChecked(), show_lines=self.chk_curves.isChecked(), show_refined=self.chk_refined.isChecked(), snap=self.chk_snap.isChecked(),
                        camera=[list(map(float, v)) for v in self.plotter.camera_position], dots=0, lines=0)
             if self.res is not None:

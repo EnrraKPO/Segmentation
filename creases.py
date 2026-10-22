@@ -48,10 +48,12 @@ def fold_change(idx, N, cut, log=None):
     return change, crest, span
 
 
-def find_dots(P, F, cells=1200, cut=17.0, spp=0.0, flat=True, log=None, height=None):
+def find_dots(P, F, cells=1200, cut=17.0, spp=0.0, flat=True, log=None, height=None, blend=True):
     """spp=0: cubes straight from the triangles (voxel.run_direct, exact overlap test, facing read at the cube centre);
-    spp>0: the old sample-point sprinkle with spp samples per cube edge (slow, memory-heavy; kept for comparison)"""
-    r = voxel.run_direct(P, F, cells, log, height=height, flat=flat) if spp <= 0 else voxel.run(P, F, cells, 0.0, log, height=height, spp=spp, flat=flat)
+    spp>0: the old sample-point sprinkle with spp samples per cube edge (slow, memory-heavy; kept for comparison).
+    blend: a cube holding several triangles takes their facings blended by the area each covers inside the cube
+    (2026-10-22); off: the triangle nearest the cube centre alone"""
+    r = voxel.run_direct(P, F, cells, log, height=height, flat=flat, blend=blend) if spp <= 0 else voxel.run(P, F, cells, 0.0, log, height=height, spp=spp, flat=flat)
     t0 = time.time(); change, crest, span = fold_change(r['idx'], r['N'], cut)
     if log: log(f'fold change {time.time()-t0:.0f} s')
     band = span >= cut

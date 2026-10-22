@@ -512,4 +512,15 @@ Open for tomorrow: write the fine walk settings and the end-line avoidance into 
   same (peak bend per rung and its jumps unchanged, line moved 0.008 mm median). Implemented anyway as the right
   reading; only the multi-triangle cubes are clipped, after all batches are in (2.1 s vs 1.8 s for the tube's box;
   clipping everything cost 8.1 s). `check_blend.py` verifies: same cubes and faces, 1 and 8 cores identical, line 318
-  refined 154 nodes, 0.005 mm median from the morning's. Stage 1 keeps blend off.
+  refined 154 nodes, 0.005 mm median from the morning's.
+- **Blend in stage 1 too** (`creases.find_dots(blend=True)`, app checkbox "Blend the triangles inside a cube by area", on by
+  default; dot sets record it, older sets load as nearest-triangle). Whole orc patch, cut 17 (`scratch/20261022_blend/
+  stage1_blend.py`): dots 1 227 246 -> 1 231 261; walk 3847 lines / 208 501 nodes -> 3288 / 213 336; 2.9M of 23.6M
+  arrows change by over 1 deg; common dots' strength moves by a few degrees either way (median -0.6). Renders
+  `out/blend1_{rim,shield,ring}_{off,on}.png` (dots by strength, walk lines blue). The multi-triangle cubes are taken
+  from the merge's sorted hit list (a run of two or more hits), their pairs clipped in chunks on the cores; the
+  within-batch nearest pick is skipped when blending so every pair reaches the merge.
+- **Overlap test, plane first** (`voxel._tri_box_overlap`): the triangle-plane check runs on all pairs, the other twelve
+  separating-axis checks only on its survivors; same hits. Whole orc batches 78 -> 36 s; cube stage 97 -> 58 s without
+  the blend, ~160 -> 103 s with it (of which clipping 36 s on 32 cores, merging 21 s). `time_stage1.py`,
+  `prof_stage1.py` time it and check the arrows against the saved run.
