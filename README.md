@@ -524,3 +524,7 @@ Open for tomorrow: write the fine walk settings and the end-line avoidance into 
   separating-axis checks only on its survivors; same hits. Whole orc batches 78 -> 36 s; cube stage 97 -> 58 s without
   the blend, ~160 -> 103 s with it (of which clipping 36 s on 32 cores, merging 21 s). `time_stage1.py`,
   `prof_stage1.py` time it and check the arrows against the saved run.
+- Clipping tests (same arrows throughout): skipping the cube planes a polygon does not cross, 36 -> 30 s; shared memory
+  for the pairs instead of pickling, no gain (the cost is the maths under 32-core memory contention: 32 us per pair in
+  parallel against 4.4 alone, `clip_cost.py`); clipping in 16k-pair pieces inside each worker, 30 -> 24 s. Left for
+  later: a leaner clipping with fewer working arrays. Machine timings vary by a third between runs today.

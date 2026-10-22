@@ -147,20 +147,23 @@ def _tri_box_overlap(Q, A, B, C, half):
 def _tri_in_cube_area(A, B, C, half):
     """area of triangle ABC (given relative to the cube centre) inside the cube [-half, half]^3, per row: the triangle is
     clipped against the six cube planes (Sutherland-Hodgman, a convex polygon of at most 9 corners), then its area taken"""
-    n = len(A); V = np.zeros((n, 10, 3)); V[:, 0] = A; V[:, 1] = B; V[:, 2] = C; cnt = np.full(n, 3); rows = np.arange(n)
+    n = len(A); V = np.zeros((n, 10, 3)); V[:, 0] = A; V[:, 1] = B; V[:, 2] = C; cnt = np.full(n, 3); slot = np.arange(10)
     for axis in range(3):
         for sign in (1.0, -1.0):                                                 # keep sign*v[axis] <= half
-            out = np.zeros_like(V); oc = np.zeros(n, int)
+            outside = (sign*V[:, :, axis] > half) & (slot[None, :] < cnt[:, None])
+            sel = np.nonzero(outside.any(1))[0]                                  # only the polygons this plane cuts; the others are left as they are
+            if len(sel) == 0: continue
+            Vs = V[sel]; cs = cnt[sel]; rows = np.arange(len(sel)); out = np.zeros_like(Vs); oc = np.zeros(len(sel), int)
             def emit(m, pt):
                 out[rows[m], oc[m]] = pt[m]; oc[m] += 1
             for k in range(9):
-                valid = k < cnt
+                valid = k < cs
                 if not valid.any(): break
-                i = np.minimum(k, cnt-1); j = (k+1) % np.maximum(cnt, 1)
-                Pi = V[rows, i]; Pj = V[rows, j]; di = sign*Pi[:, axis]-half; dj = sign*Pj[:, axis]-half
+                i = np.minimum(k, cs-1); j = (k+1) % np.maximum(cs, 1)
+                Pi = Vs[rows, i]; Pj = Vs[rows, j]; di = sign*Pi[:, axis]-half; dj = sign*Pj[:, axis]-half
                 ini = di <= 0; inj = dj <= 0; t = di/np.where(di-dj != 0, di-dj, 1); cross = Pi+t[:, None]*(Pj-Pi)
                 emit(valid & ini & ~inj, cross); emit(valid & ~ini & inj, cross); emit(valid & inj, Pj)
-            V, cnt = out, oc
+            V[sel] = out; cnt[sel] = oc
     area = np.zeros(n)
     for k in range(1, 9):                                                        # fan from corner 0
         m = k+1 < cnt
@@ -210,13 +213,31 @@ def _direct_task(args):
     return key, d.astype(np.float32), rep.astype(np.int32), nrm, ntest, side
 
 
+def _blend_sums(pk, pr, cu):
+    """(cube, triangle) pairs sorted by cube, cu = each pair's cube number from 0: each triangle clipped to its cube and its
+    facing weighed by the area inside; returns the summed weighted facing per cube number"""
+    A, B, C, FN, lo, size = (_W[k] for k in ('A', 'B', 'C', 'FN', 'lo', 'size')); n = int(cu[-1])+1; tot = np.zeros((n, 3))
+    for s in range(0, len(pk), _BLEND_SUB):                                    # small pieces: the clipping's working arrays stay in cache
+        k, r, c = pk[s:s+_BLEND_SUB], pr[s:s+_BLEND_SUB], cu[s:s+_BLEND_SUB]
+        cid = np.stack([k // (KB*KB), (k // KB) % KB, k % KB], 1); Q = lo+(cid+0.5)*size
+        wa = _tri_in_cube_area(A[r]-Q, B[r]-Q, C[r]-Q, size*0.5); fa = FN[r]*wa[:, None]
+        for c_ in range(3): tot[:, c_] += np.bincount(c, fa[:, c_], minlength=n)
+    return tot
+
+
+_BLEND_SUB = 16384   # pairs per clipping piece (16k: the working arrays stay in cache; measured 5 us per pair against 8 unchunked)
+
+
 def _blend_task(args):
-    """one chunk of (cube, triangle) pairs, sorted by cube: each triangle clipped to its cube, its facing weighed by the area
-    inside; returns the cubes of the chunk and their summed weighted facings"""
-    pk, pr = args; A, B, C, FN, lo, size = (_W[k] for k in ('A', 'B', 'C', 'FN', 'lo', 'size'))
-    cid = np.stack([pk // (KB*KB), (pk // KB) % KB, pk % KB], 1); Q = lo+(cid+0.5)*size
-    wa = _tri_in_cube_area(A[pr]-Q, B[pr]-Q, C[pr]-Q, size*0.5); fa = FN[pr]*wa[:, None]; ub, inv = np.unique(pk, return_inverse=True)
-    return ub, np.stack([np.bincount(inv, fa[:, c], minlength=len(ub)) for c in range(3)], 1)
+    """one chunk of the pairs, read from shared memory (nothing is copied to the core); the chunk holds whole cubes, so
+    its sums are written straight into their rows of the shared result"""
+    from multiprocessing import shared_memory
+    spec, s, e = args; shm = {k: shared_memory.SharedMemory(name=v[0]) for k, v in spec.items()}
+    arr = {k: np.ndarray(v[1], dtype=v[2], buffer=shm[k].buf) for k, v in spec.items()}
+    import time; t0 = time.time()
+    cu = arr['CU'][s:e]; c0 = int(cu[0]); arr['OUT'][c0:int(cu[-1])+1] = _blend_sums(arr['PK'][s:e], arr['PR'][s:e], cu-c0)
+    for m in shm.values(): m.close()
+    return e-s, time.time()-t0
 
 
 def run_direct(P, F, cells=300, log=None, height=None, flat=True, batch=2_000_000, workers=None, box=None, blend=False):
@@ -267,12 +288,14 @@ def run_direct(P, F, cells=300, log=None, height=None, flat=True, batch=2_000_00
         if log: log(f'  cubes: merging {len(grp)/1e6:.0f}M hits, {time.time()-t1:.0f} s')
         multi = None
         if blend:                                                                                  # the hits of a cube are adjacent: a run of two or more
-            m = np.bincount(grp)[grp] >= 2; multi = (key[m], fid[m])                               # is a cube holding two or more triangles, to be blended
+            m = np.bincount(grp)[grp] >= 2; g = grp[m]; fm = np.r_[True, g[1:] != g[:-1]]            # is a cube holding two or more triangles, to be blended
+            multi = (key[m], fid[m], np.cumsum(fm)-1, g[fm])                                       # pairs, their cube number from 0, that cube's row in the result
         return key[pick], fid[pick], o[pick], multi
 
-    def blend_chunks(multi):
-        """the (cube, triangle) hits of the multi-triangle cubes, cut into chunks for the clipping on the cores"""
-        pk, pr = multi; n = max(1, int(np.ceil(len(pk)/max(1, workers*4)))); return [(pk[i:i+n], pr[i:i+n]) for i in range(0, len(pk), n)], len(pk)
+    def blend_chunks(cu):
+        """cut the pairs into chunks of whole cubes, a few per core"""
+        n = max(1, workers*4); b = np.searchsorted(cu, cu[np.linspace(0, len(cu)-1, n+1).astype(int)]); b[-1] = len(cu); b = np.unique(b)
+        return list(zip(b[:-1], b[1:]))
 
     if workers > 1 and len(tasks) > 1:
         from multiprocessing import shared_memory
@@ -285,8 +308,14 @@ def run_direct(P, F, cells=300, log=None, height=None, flat=True, batch=2_000_00
             with ProcessPoolExecutor(workers, initializer=_direct_init, initargs=(spec, lo, size)) as ex:
                 for r in ex.map(_direct_task, tasks, chunksize=max(1, len(tasks)//(workers*8))): take(r)
                 uk, fid, o, multi = merge()
-                if blend:
-                    chunks, npairs = blend_chunks(multi); t1 = time.time(); parts = list(ex.map(_blend_task, chunks))
+                if blend:                                                        # the pairs go to the cores through shared memory, the sums come back the same way
+                    t1 = time.time(); pk, pr, cu, row = multi; bspec = {}; tot = np.zeros((len(row), 3))
+                    for k, arr in dict(PK=pk, PR=pr, CU=cu, OUT=tot).items():
+                        arr = np.ascontiguousarray(arr); shm = shared_memory.SharedMemory(create=True, size=arr.nbytes); shms.append(shm)
+                        np.ndarray(arr.shape, dtype=arr.dtype, buffer=shm.buf)[:] = arr; bspec[k] = (shm.name, arr.shape, arr.dtype)
+                    rr = list(ex.map(_blend_task, [(bspec, s, e) for s, e in blend_chunks(cu)])); npairs = sum(r[0] for r in rr); busy = sum(r[1] for r in rr)
+                    if log: log(f'  blend: {len(rr)} chunks, worker time {busy:.0f} s in all, longest {max(r[1] for r in rr):.1f} s')
+                    tot = np.ndarray(tot.shape, dtype=tot.dtype, buffer=shms[-1].buf).copy()
                     if log: log(f'  blend: clipped on {workers} cores in {time.time()-t1:.0f} s')
         finally:
             for shm in shms: shm.close(); shm.unlink()
@@ -294,15 +323,13 @@ def run_direct(P, F, cells=300, log=None, height=None, flat=True, batch=2_000_00
         _W.update(A=A, B=B, C=C, VN=VN, F=F, FN=fn, lo=lo, size=size)
         for t in tasks: take(_direct_task(t))
         uk, fid, o, multi = merge()
-        if blend: chunks, npairs = blend_chunks(multi); parts = [_blend_task(c) for c in chunks]
+        if blend: pk, pr, cu, row = multi; tot = _blend_sums(pk, pr, cu); npairs = len(pk)
     face = tri_id[fid]
     idx = np.stack([uk // (KB*KB), (uk // KB) % KB, uk % KB], 1)
     N = fn[fid].copy() if flat else np.concatenate(nrms)[o].astype(np.float64)
     if blend:                                                                   # only the cubes holding two or more triangles need the blend: there each
-        t1 = time.time(); ub = np.concatenate([p[0] for p in parts]); tot = np.concatenate([p[1] for p in parts])   # triangle was clipped to the cube and weighed by the area it covers inside it
-        ub, inv = np.unique(ub, return_inverse=True); tot = np.stack([np.bincount(inv, tot[:, c], minlength=len(ub)) for c in range(3)], 1)   # a cube split over two chunks: its parts added
-        pos = np.searchsorted(uk, ub); ok = np.linalg.norm(tot, axis=1) > 1e-12; N[pos[ok]] = tot[ok]   # a cube with no area inside it (triangles only touching it) keeps the nearest facing
-        if log: log(f'  blend: {len(ub)} of {len(uk)} cubes hold two or more triangles ({npairs} pairs clipped on {workers} cores), {time.time()-t1:.0f} s')
+        ok = np.linalg.norm(tot, axis=1) > 1e-12; N[row[ok]] = tot[ok]        # triangle was clipped to the cube and weighed by the area it covers inside it;
+        if log: log(f'  blend: {len(row)} of {len(uk)} cubes hold two or more triangles ({npairs} pairs clipped on {workers} cores)')   # a cube with no area inside it (triangles only touching it) keeps the nearest facing
     N /= np.linalg.norm(N, axis=1, keepdims=True)+1e-12
     k = len(idx)
     if log: log(f'grid {cells} cells/height, cell {size:.3f} mm: {k} surface cells, {ntest/1e6:.0f}M cube-triangle tests, {len(tasks)} batches on {workers} cores, {time.time()-t0:.0f} s')
