@@ -140,6 +140,31 @@ def _tri_box_overlap(Q, A, B, C, half):
     return ok
 
 
+def _tri_in_cube_area(A, B, C, half):
+    """area of triangle ABC (given relative to the cube centre) inside the cube [-half, half]^3, per row: the triangle is
+    clipped against the six cube planes (Sutherland-Hodgman, a convex polygon of at most 9 corners), then its area taken"""
+    n = len(A); V = np.zeros((n, 10, 3)); V[:, 0] = A; V[:, 1] = B; V[:, 2] = C; cnt = np.full(n, 3); rows = np.arange(n)
+    for axis in range(3):
+        for sign in (1.0, -1.0):                                                 # keep sign*v[axis] <= half
+            out = np.zeros_like(V); oc = np.zeros(n, int)
+            def emit(m, pt):
+                out[rows[m], oc[m]] = pt[m]; oc[m] += 1
+            for k in range(9):
+                valid = k < cnt
+                if not valid.any(): break
+                i = np.minimum(k, cnt-1); j = (k+1) % np.maximum(cnt, 1)
+                Pi = V[rows, i]; Pj = V[rows, j]; di = sign*Pi[:, axis]-half; dj = sign*Pj[:, axis]-half
+                ini = di <= 0; inj = dj <= 0; t = di/np.where(di-dj != 0, di-dj, 1); cross = Pi+t[:, None]*(Pj-Pi)
+                emit(valid & ini & ~inj, cross); emit(valid & ~ini & inj, cross); emit(valid & inj, Pj)
+            V, cnt = out, oc
+    area = np.zeros(n)
+    for k in range(1, 9):                                                        # fan from corner 0
+        m = k+1 < cnt
+        if not m.any(): break
+        area[m] += 0.5*np.linalg.norm(np.cross(V[m, k]-V[m, 0], V[m, k+1]-V[m, 0]), axis=1)
+    return area
+
+
 _W = {}   # per-process data for the direct builder (set by _direct_init)
 
 
@@ -156,17 +181,18 @@ def _direct_init(spec, lo, size):
 
 def _direct_task(args):
     """one batch of triangles that all span the same box of cubes: returns the cubes they overlap"""
-    tri, sp, imin_tri, flat = args
+    tri, sp, imin_tri, flat, blend = args
     A, B, C, VN, F, lo, size = (_W[k] for k in ('A', 'B', 'C', 'VN', 'F', 'lo', 'size'))
     ncand = int(np.prod(sp)); half = size*0.5
     offs = np.stack(np.meshgrid(np.arange(sp[0]), np.arange(sp[1]), np.arange(sp[2]), indexing='ij'), -1).reshape(-1, 3)
     cid = imin_tri[:, None, :]+offs[None]                                     # (n, ncand, 3) cube indices
     Q = (lo+(cid+0.5)*size).reshape(-1, 3); rep = np.repeat(tri, ncand)
     inside = _tri_box_overlap(Q, A[rep], B[rep], C[rep], half); ntest = len(Q)
-    if not inside.any(): return None, None, None, None, ntest, None
+    if not inside.any(): return None, None, None, None, ntest, None, None, None
     Q = Q[inside]; rep = rep[inside]; cid = cid.reshape(-1, 3)[inside]
     X = _closest_on_triangles(Q, A[rep], B[rep], C[rep]); d = np.linalg.norm(X-Q, axis=1)
     key = (cid[:, 0]*KB+cid[:, 1])*KB+cid[:, 2]; nrm = None
+    bkey, bsum = (key.copy(), rep.astype(np.int32)) if blend else (None, None)   # blend: every (cube, triangle) pair, blended after all batches are in
     # side score for ties (cube centre equally near two triangles = nearest point on their shared edge): the triangle
     # whose facing points most directly at the cube centre is the side the cube is over; lower score = better
     fnr = _W['FN'][rep]; side = (-np.abs((fnr*(Q-X)).sum(1))/np.maximum(d, 1e-12)).astype(np.float32)
@@ -177,23 +203,30 @@ def _direct_task(args):
         d00 = (v0*v0).sum(1); d01 = (v0*v1).sum(1); d11 = (v1*v1).sum(1); d20 = (v2*v0).sum(1); d21 = (v2*v1).sum(1)
         den = d00*d11-d01*d01; den = np.where(den != 0, den, 1); bv = (d11*d20-d01*d21)/den; bw = (d00*d21-d01*d20)/den; bu = 1-bv-bw
         nrm = (VN[F[rep, 0]]*bu[:, None]+VN[F[rep, 1]]*bv[:, None]+VN[F[rep, 2]]*bw[:, None]).astype(np.float32)
-    return key, d.astype(np.float32), rep.astype(np.int32), nrm, ntest, side
+    return key, d.astype(np.float32), rep.astype(np.int32), nrm, ntest, side, bkey, bsum
 
 
-def run_direct(P, F, cells=300, log=None, height=None, flat=True, batch=2_000_000, workers=None):
-    """Surface cubes straight from the triangles, no sample points. For each triangle, every cube in the box its
+def run_direct(P, F, cells=300, log=None, height=None, flat=True, batch=2_000_000, workers=None, box=None, blend=False):
+    """Surface cubes straight from the triangles, no sample points. box=(lo, hi) in mm: cubes are laid only inside it. For each triangle, every cube in the box its
     corners span is tested exactly for overlap with the triangle (separating axes). A cube overlapped by several
     triangles keeps the one whose nearest point is closest to the cube centre and reads its facing there (flat: the
-    triangle's own; else the corner-blended facing at that point). The triangles are split into batches and spread
+    triangle's own; else the corner-blended facing at that point). blend=True: the cube's facing is instead the facings
+    of ALL the triangles inside it, each weighted by the area it covers inside the cube (the triangle clipped to the
+    cube), so the arrow changes gradually as a crease crosses from one cube to the next; `face` stays the nearest triangle. The triangles are split into batches and spread
     over `workers` processes (default: all cores). Returns the same fields as run(); turn/line are zeros
     (creases.fold_change computes the fold change)."""
     import trimesh, time, os
     from concurrent.futures import ProcessPoolExecutor
     lo = P.min(0); ext = P.max(0)-lo; height = ext.max() if height is None else height; size = height/cells
-    A, B, C = P[F[:, 0]], P[F[:, 1]], P[F[:, 2]]
-    T = np.stack([A, B, C], 1); g = (T-lo)/size
-    imin = np.floor(g.min(1)).astype(np.int64); imax = np.floor(g.max(1)).astype(np.int64); span = imax-imin+1
+    A, B, C = P[F[:, 0]], P[F[:, 1]], P[F[:, 2]]; tri_id = np.arange(len(F))
     VN = trimesh.Trimesh(P, F, process=False).vertex_normals if not flat else None
+    T = np.stack([A, B, C], 1); g = (T-lo)/size
+    imin = np.floor(g.min(1)).astype(np.int64); imax = np.floor(g.max(1)).astype(np.int64)
+    if box is not None:                                                        # cubes are laid only inside this box (mm); a triangle's candidate cubes are clipped to it
+        bmin = np.floor((np.asarray(box[0])-lo)/size).astype(np.int64); bmax = np.floor((np.asarray(box[1])-lo)/size).astype(np.int64)
+        imin = np.maximum(imin, bmin); imax = np.minimum(imax, bmax); keep = (imax >= imin).all(1)
+        A, B, C, imin, imax = A[keep], B[keep], C[keep], imin[keep], imax[keep]; F = F[keep]; tri_id = tri_id[keep]
+    span = imax-imin+1
     fn = np.cross(B-A, C-A); fn /= np.linalg.norm(fn, axis=1, keepdims=True)+1e-12
     skey = (span[:, 0]*KB+span[:, 1])*KB+span[:, 2]; order = np.argsort(skey, kind='stable'); skey_s = skey[order]
     starts = np.r_[0, np.nonzero(skey_s[1:] != skey_s[:-1])[0]+1, len(order)]
@@ -201,14 +234,14 @@ def run_direct(P, F, cells=300, log=None, height=None, flat=True, batch=2_000_00
     for a, b in zip(starts[:-1], starts[1:]):
         grp = order[a:b]; sp = span[grp[0]]; step = max(1, batch//int(sp.prod()))
         for c0 in range(0, len(grp), step):
-            tri = grp[c0:c0+step]; tasks.append((tri, sp, imin[tri], flat))
+            tri = grp[c0:c0+step]; tasks.append((tri, sp, imin[tri], flat, blend))
     tasks.sort(key=lambda t: -len(t[0])*int(np.prod(t[1])))                     # biggest batches first: balanced finish
     workers = workers or os.cpu_count() or 1
-    keys, dists, fids, nrms, sides = [], [], [], [], []; ntest = 0; done = 0; t0 = time.time(); nxt = 0.1
+    keys, dists, fids, nrms, sides, bkeys, bsums = [], [], [], [], [], [], []; ntest = 0; done = 0; t0 = time.time(); nxt = 0.1
     def take(r):
         nonlocal ntest, done, nxt
-        key, d, rep, nrm, nt, side = r; ntest += nt; done += 1
-        if key is not None: keys.append(key); dists.append(d); fids.append(rep); nrms.append(nrm); sides.append(side)
+        key, d, rep, nrm, nt, side, bkey, bsum = r; ntest += nt; done += 1
+        if key is not None: keys.append(key); dists.append(d); fids.append(rep); nrms.append(nrm); sides.append(side); bkeys.append(bkey); bsums.append(bsum)
         if log and done >= nxt*len(tasks): log(f'  cubes: {100*done/len(tasks):.0f} % of triangle batches, {time.time()-t0:.0f} s'); nxt += 0.1
     if workers > 1 and len(tasks) > 1:
         from multiprocessing import shared_memory
@@ -233,9 +266,18 @@ def run_direct(P, F, cells=300, log=None, height=None, flat=True, batch=2_000_00
     pick = np.nonzero(dist == best[grp])[0]; pick = pick[np.r_[True, grp[pick][1:] != grp[pick][:-1]]]   # nearest; ties (centre nearest to a shared edge) -> the triangle facing the cube centre most directly
     o = o[pick]; key, dist, fid = key[pick], dist[pick], fid[pick]
     if log: log(f'  cubes: merging {len(grp)/1e6:.0f}M hits, {time.time()-t1:.0f} s')
-    first = np.ones(len(key), bool); uk = key; face = fid
+    first = np.ones(len(key), bool); uk = key; face = tri_id[fid]
     idx = np.stack([uk // (KB*KB), (uk // KB) % KB, uk % KB], 1)
-    N = fn[face].copy() if flat else np.concatenate(nrms)[o][first].astype(np.float64)
+    N = fn[fid].copy() if flat else np.concatenate(nrms)[o][first].astype(np.float64)
+    if blend:                                                                   # only the cubes holding two or more triangles need the blend; there each
+        pk = np.concatenate(bkeys); pr = np.concatenate(bsums)                  # triangle is clipped to the cube and weighs by the area it covers inside it
+        pk, pr = np.unique(np.stack([pk, pr.astype(np.int64)], 1), axis=0).T   # a pair once, whatever batch it came from
+        cnt = np.bincount(np.searchsorted(uk, pk), minlength=len(uk)); multi = cnt[np.searchsorted(uk, pk)] >= 2; pk, pr = pk[multi], pr[multi]
+        cid = np.stack([pk // (KB*KB), (pk // KB) % KB, pk % KB], 1); Q = lo+(cid+0.5)*size
+        wa = _tri_in_cube_area(A[pr]-Q, B[pr]-Q, C[pr]-Q, size*0.5); fa = fn[pr]*wa[:, None]; ub, inv = np.unique(pk, return_inverse=True)
+        tot = np.stack([np.bincount(inv, fa[:, c], minlength=len(ub)) for c in range(3)], 1); pos = np.minimum(np.searchsorted(uk, ub), len(uk)-1)
+        ok = np.linalg.norm(tot, axis=1) > 1e-12; N[pos[ok]] = tot[ok]           # a cube with no area inside it (triangles only touching it) keeps the nearest facing
+        if log: log(f'  blend: {len(ub)} of {len(uk)} cubes hold two or more triangles ({len(pk)} pairs clipped)')
     N /= np.linalg.norm(N, axis=1, keepdims=True)+1e-12
     k = len(idx)
     if log: log(f'grid {cells} cells/height, cell {size:.3f} mm: {k} surface cells, {ntest/1e6:.0f}M cube-triangle tests, {len(tasks)} batches on {workers} cores, {time.time()-t0:.0f} s')

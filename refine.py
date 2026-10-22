@@ -1,58 +1,26 @@
-"""Refinement of a line from the mesh itself, at a resolution far below the walk's cubes (session 2026-10-21).
+"""Stage 3: refine a walked line in a tube of fine cubes (brief agreed 2026-10-21, evening).
 
-Stage 3 of the pipeline: the walk (trace4) gives a coarse line on each crease; this module moves it onto the crease
-exactly as the surface shows it, then draws it as a clean curve.
-
-Measurement (refine_line): the line is resampled every STEP mm. At each point a slice is walked across the line on the
-surface in FINE steps, the facing read as the render blends it (corner normals interpolated across the triangle). The
-surface on each side is read as a plane: a weighted average of position and facing where every weight is a smooth
-function of distance (rises in from the point so the strip of connecting triangles counts little, fades out so the
-rounding further away counts little) and the planes are averaged gradually along the line. The point moves to where
-the two planes cross. Repeated from the new point until it settles. No cut-offs, no picks, no boxes anywhere:
-neighbouring points 0.02 mm apart must land within a hair of each other, since the surface is continuous.
-
-Curve (fit_curve): the measured path is ironed; where it still turns more than CORNER it breaks (two lines meeting);
-where it bends more than BEND it gets a joint (one continuous curve through it). One cubic spline per stretch between
-corners, with a knot at each joint; where the curve misses the measurements by more than TOL a joint is added there
-and the stretch refitted. The result is a few control points per line and a smooth sweep between them.
-"""
-import numpy as np, trimesh
+The walk's line says where to look. Around it a tube of cubes about ten times finer than the walk's is laid: the
+same cube stage as stage 1 (voxel.run_direct) restricted to the box around the line, with each cube's facing the blend of
+all the triangles inside it, weighted by the area each covers in the cube (blend=True, 2026-10-22: a crease cube is no
+longer one side or the other by where its centre falls); of those cubes only the ones within RADIUS of the line are kept.
+On the tube each fine cube's bend is read over the surrounding area (bend): how fast the facing turns across a
+neighbourhood AREA mm wide around the cube, with smooth weights over it, as degrees per UNIT mm (the coarse cube,
+so the cut keeps its meaning). The cube next door decides nothing. A dot where that bend is at least the cut. The same anchored walk as stage 2 (trace4.run)
+then runs on the fine dots, with its lengths in mm unchanged. The result is the line at the fine cube's resolution.
+The fine walk keeps the walk's lengths in mm, with the settings agreed for the fine band (WALK): reach one step so it
+never leaves the band, each dot's say its bend squared, trend pull equal to the dots'. End rule (avoid): the fine dots
+within the area's reach (2*AREA) of the other walked lines our own ends sit on are removed before the walk, since
+there the bend read mixes both creases and the band curls toward the neighbour; no other line counts.
+Nothing else: no triangles are chosen, no planes, no curve fit."""
+import os, sys, time, numpy as np
 from scipy.spatial import cKDTree
-from scipy.interpolate import make_lsq_spline
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import voxel, trace4
 
-DEFAULTS = dict(step=0.02, fine=0.0087, range=0.6, sin=0.06, sout=0.2, salong=0.05, passes=6,
-                iron=0.5, chord=0.8, bend=15.0, corner=45.0, tol=0.05)
-
-
-class Band:
-    """the part of the mesh near a set of lines, with shared corners so facings blend across triangles"""
-    def __init__(self, P, F, near_pts, radius):
-        cen = P[F].mean(1); keep = cKDTree(near_pts).query(cen)[0] <= radius; Fp = F[keep]
-        used = np.unique(Fp); rm = -np.ones(len(P), int); rm[used] = np.arange(len(used))
-        self.m = trimesh.Trimesh(P[used], rm[Fp], process=False); self.m.merge_vertices()
-        self.FN = self.m.face_normals; self.VN = self.m.vertex_normals; self.n_faces = len(self.m.faces)
-
-    def drop(self, Q):
-        """nearest surface point and its triangle"""
-        C, _, t = trimesh.proximity.closest_point(self.m, Q); return C, t
-
-    def facing(self, Q, t):
-        """the facing the render shows at surface point Q on triangle t: the corner facings blended by position"""
-        tri = self.m.triangles[t]; A, B, C = tri[:, 0], tri[:, 1], tri[:, 2]; v0 = B-A; v1 = C-A; v2 = Q-A
-        d00 = (v0*v0).sum(1); d01 = (v0*v1).sum(1); d11 = (v1*v1).sum(1); d20 = (v2*v0).sum(1); d21 = (v2*v1).sum(1)
-        den = d00*d11-d01*d01; den = np.where(np.abs(den) > 1e-18, den, 1); v = (d11*d20-d01*d21)/den; w = (d00*d21-d01*d20)/den; u = 1-v-w
-        fv = self.m.faces[t]; n = self.VN[fv[:, 0]]*u[:, None]+self.VN[fv[:, 1]]*v[:, None]+self.VN[fv[:, 2]]*w[:, None]
-        return n/(np.linalg.norm(n, axis=1, keepdims=True)+1e-12)
-
-    def push(self, Q, n):
-        """back onto the surface along direction n (continuous), nearest point only where the ray misses"""
-        out = Q.copy(); hit = np.zeros(len(Q), bool)
-        for sgn in (1, -1):
-            if hit.all(): break
-            loc, idr, _ = self.m.ray.intersects_location(Q[~hit]-sgn*0.3*n[~hit], sgn*n[~hit], multiple_hits=False)
-            if len(idr): ii = np.flatnonzero(~hit)[idr]; out[ii] = loc.reshape(-1, 3); hit[ii] = True
-        if (~hit).any(): out[~hit] = self.drop(Q[~hit])[0]
-        return out
+DEFAULTS = dict(finer=3, radius=0.3, area=0.087, unit=0.087)
+TUNE = dict(nbh=2.0, rungstep=0.5, rungw=0.5, cresth=0.5, tuberes=0.5, avoidk=2.0, avoidres=0.02, slack=1.0)   # the stage's inner constants (see TUNE_TIPS in app.py)
+WALK = dict(step=0.087, slice=0.7, reach=0.087, pull=1.0, look=0.45, levp=2.0, minlen=8)   # the fine walk's settings (2026-10-21)
 
 
 def resample(L, step):
@@ -61,92 +29,114 @@ def resample(L, step):
     t = np.arange(0, d[-1], step); return np.stack([np.interp(t, d, L[:, i]) for i in range(3)], 1)
 
 
-def refine_line(L, band, step=0.02, fine=0.0087, sin=0.06, sout=0.2, salong=0.05, passes=6, **kw):
-    """L: coarse line (mm). Returns the measured line (same spacing as STEP) and the mean facing at each point."""
-    rng = kw.get('range', 0.6); L = resample(L, step); K = len(L)
-    if K < 4: C, t = band.drop(L); return C, band.facing(C, t)
-    T = np.gradient(L, axis=0); T /= np.linalg.norm(T, axis=1, keepdims=True)+1e-12
-    dl = np.r_[0, np.cumsum(np.linalg.norm(np.diff(L, axis=0), axis=1))]
-    WA = np.exp(-((dl[:, None]-dl[None, :])/salong)**2); WA /= WA.sum(1, keepdims=True)
-    nst = int(round(rng/fine)); S = np.arange(-nst, nst+1)*fine
-    say = (1-np.exp(-(S/sin)**2))*np.exp(-(S/sout)**2); wA = np.where(S < 0, say, 0.0); wB = np.where(S > 0, say, 0.0)
-
-    def march(C0, N0, sign):
-        q = C0.copy(); u = np.cross(N0, T)*sign; u /= np.linalg.norm(u, axis=1, keepdims=True)+1e-12; pos = [q.copy()]; fac = [N0.copy()]
-        for _ in range(nst):
-            q2, tq = band.drop(q+fine*u); n2 = band.facing(q2, tq); u = u-(u*n2).sum(1, keepdims=True)*n2; u /= np.linalg.norm(u, axis=1, keepdims=True)+1e-12
-            q = q2; pos.append(q.copy()); fac.append(n2.copy())
-        return np.stack(pos, 1), np.stack(fac, 1)
-
-    start = L.copy(); nA = nB = None
-    for it in np.arange(passes):
-        C0, T0 = band.drop(start); N0 = WA @ band.facing(C0, T0)
-        if nA is not None: N0 = nA+nB
-        N0 /= np.linalg.norm(N0, axis=1, keepdims=True)+1e-12
-        pp, fp = march(C0, N0, 1); pm, fm = march(C0, N0, -1)
-        pos = np.concatenate([pm[:, :0:-1], pp], 1); fac = np.concatenate([fm[:, :0:-1], fp], 1)
-        nA = (fac*wA[None, :, None]).sum(1)/wA.sum(); pA = (pos*wA[None, :, None]).sum(1)/wA.sum()
-        nB = (fac*wB[None, :, None]).sum(1)/wB.sum(); pB = (pos*wB[None, :, None]).sum(1)/wB.sum()
-        nA, pA, nB, pB = WA @ nA, WA @ pA, WA @ nB, WA @ pB
-        nA /= np.linalg.norm(nA, axis=1, keepdims=True)+1e-12; nB /= np.linalg.norm(nB, axis=1, keepdims=True)+1e-12
-        R = C0.copy()
-        for k in np.arange(K):
-            A = np.stack([nA[k], nB[k], T[k]]); b = np.array([nA[k] @ pA[k], nB[k] @ pB[k], T[k] @ C0[k]])
-            if abs(np.linalg.det(A)) > 1e-6: R[k] = np.linalg.solve(A, b)
-        nn = nA+nB; nn /= np.linalg.norm(nn, axis=1, keepdims=True)+1e-12
-        new = band.push(R, nn); shift = np.linalg.norm(new-start, axis=1); start = new
-        if np.percentile(shift, 90) < 0.002: break
-    return R, nn
+def bend(C, N, area=0.087, unit=0.087, log=None, chunk=1500, at=None, nbh=2.0):
+    """C cube centres (mm), N facings. Per cube: the rate of turn of the facing over the surrounding area (shape operator
+    fitted to all neighbours within nbh*area, weighted exp(-(d/area)^2)), in degrees per unit mm, and the across direction."""
+    t0 = time.time(); tree = cKDTree(C); k = len(C); turn = np.zeros(k); d1 = np.zeros((k, 3)); at = np.arange(k) if at is None else np.asarray(at)   # at: the cubes to read (all neighbours still count)
+    a = np.where((np.abs(N[:, 0]) < 0.9)[:, None], np.array([1., 0, 0]), np.array([0, 1., 0]))
+    t1 = np.cross(N, a); t1 /= np.linalg.norm(t1, axis=1, keepdims=True)+1e-12; t2 = np.cross(N, t1)
+    for s0 in range(0, len(at), chunk):
+        ii = at[s0:s0+chunk]; nb = tree.query_ball_point(C[ii], nbh*area)
+        cnt = np.array([len(b) for b in nb]); i = np.repeat(ii, cnt); j = np.concatenate([np.asarray(b, int) for b in nb])
+        dx = C[j]-C[i]; w = np.exp(-(np.linalg.norm(dx, axis=1)/area)**2); dx -= (dx*N[i]).sum(1, keepdims=True)*N[i]; dn = N[j]-N[i]
+        ex, ey = (dx*t1[i]).sum(1), (dx*t2[i]).sum(1); nx, ny = (dn*t1[i]).sum(1), (dn*t2[i]).sum(1)
+        loc = np.repeat(np.arange(len(ii)), cnt); acc = lambda v: np.bincount(loc, v*w, minlength=len(ii))
+        A11, A12, A22 = acc(ex*ex), acc(ex*ey), acc(ey*ey); B11, B12, B21, B22 = acc(nx*ex), acc(nx*ey), acc(ny*ex), acc(ny*ey)
+        det = A11*A22-A12*A12+1e-18; I11, I12, I22 = A22/det, -A12/det, A11/det
+        S11 = B11*I11+B12*I12; S12 = B11*I12+B12*I22; S21 = B21*I11+B22*I12; S22 = B21*I12+B22*I22
+        s12 = 0.5*(S12+S21); tr = S11+S22; dd = np.sqrt(np.maximum(((S11-S22)/2)**2+s12**2, 0)); l1, l2 = tr/2+dd, tr/2-dd
+        k1 = np.where(np.abs(l1) >= np.abs(l2), l1, l2); turn[ii] = np.degrees(np.abs(k1))*unit
+        vx = np.where(np.abs(s12) > 1e-12, s12, np.where(np.abs(S11-k1) < np.abs(S22-k1), 0.0, 1.0)); vy = np.where(np.abs(s12) > 1e-12, k1-S11, np.where(np.abs(S11-k1) < np.abs(S22-k1), 1.0, 0.0))
+        nv = np.sqrt(vx*vx+vy*vy)+1e-18; d1[ii] = (vx/nv)[:, None]*t1[ii]+(vy/nv)[:, None]*t2[ii]
+    turn, d1 = turn[at], d1[at]
+    if log: log(f'bend over {area} mm at {len(at)} cubes: p50 {np.percentile(turn, 50):.1f} p90 {np.percentile(turn, 90):.1f} p99 {np.percentile(turn, 99):.1f} deg per {unit} mm, {time.time()-t0:.1f} s')
+    return turn, d1
 
 
-def fit_curve(R, iron=0.5, chord=0.8, bend=15.0, corner=45.0, tol=0.05, **_):
-    """R: measured line. Returns (curve points every 0.02 mm, corner points, joint points)."""
-    d = np.r_[0, np.cumsum(np.linalg.norm(np.diff(R, axis=0), axis=1))]
-    if len(R) < 8 or d[-1] < 2*chord: return R.copy(), R[:0], R[:0]
-    W = np.exp(-((d[:, None]-d[None, :])/iron)**2); I = (W @ R)/W.sum(1, keepdims=True)
-    at = lambda Q, s: np.stack([np.interp(s, d, Q[:, i]) for i in range(3)], 1)
-    a = I-at(I, np.maximum(d-chord, 0)); b = at(I, np.minimum(d+chord, d[-1]))-I
-    a /= np.linalg.norm(a, axis=1, keepdims=True)+1e-12; b /= np.linalg.norm(b, axis=1, keepdims=True)+1e-12
-    turn = np.degrees(np.arccos(np.clip((a*b).sum(1), -1, 1))); turn[(d < chord) | (d > d[-1]-chord)] = 0
-    cand = np.flatnonzero((turn >= bend) & (turn >= np.r_[0, turn[:-1]]) & (turn >= np.r_[turn[1:], 0])); picked = []
-    for i in cand[np.argsort(-turn[cand])]:
-        if all(abs(d[i]-d[j]) > chord for j in picked): picked.append(i)
-    corners = sorted(i for i in picked if turn[i] >= corner); joints = sorted(i for i in picked if turn[i] < corner)
-
-    def fit(s, e, knots):
-        u = d[s:e+1]-d[s]; P = R[s:e+1]; w = np.ones(len(u)); w[0] = w[-1] = 100; k = 3
-        inner = sorted(d[j]-d[s] for j in knots if s < j < e and d[j]-d[s] > 0.1 and d[e]-d[j] > 0.1)
-        t = np.r_[[0]*(k+1), inner, [u[-1]]*(k+1)]
-        if len(u) <= len(t)-k-1: return P, np.zeros(len(u))
-        spl = make_lsq_spline(u, P, t, k=k, w=w); return spl(np.arange(0, u[-1], 0.02)), np.linalg.norm(spl(u)-P, axis=1)
-    bounds = [0]+corners+[len(R)-1]; added = 0
-    while added < 40:
-        worst = None
-        for s, e in zip(bounds[:-1], bounds[1:]):
-            _, miss = fit(s, e, joints); ok = np.ones(len(miss), bool); ok[:6] = ok[-6:] = False
-            for q in joints: ok &= np.abs(d[s:e+1]-d[q]) > 0.15
-            if not ok.any(): continue
-            j = int(np.argmax(np.where(ok, miss, -1)))
-            if miss[j] > tol and (worst is None or miss[j] > worst[0]): worst = (miss[j], s+j)
-        if worst is None: break
-        joints.append(worst[1]); added += 1
-    joints = sorted(joints); pieces = [fit(s, e, joints)[0] for s, e in zip(bounds[:-1], bounds[1:])]
-    return np.vstack(pieces+[R[-1:]]), R[corners], R[joints]
+def tube(L, P, F, cube, height, finer=10, radius=0.3, cut=17.0, flat=True, log=None, workers=None, area=0.087, unit=0.087, rungs=True, tune=None):
+    """fine cubes within `radius` mm of line L (mm), with their fold change and dot flag; same fields as creases.find_dots"""
+    tn = {**TUNE, **(tune or {})}; size = cube/finer; cells = height/size; L = np.asarray(L, float)
+    box = (L.min(0)-radius-size, L.max(0)+radius+size); t0 = time.time()
+    r = voxel.run_direct(P, F, cells, log, height=height, flat=flat, box=box, workers=workers, blend=True)
+    centre = r['lo']+(r['idx']+0.5)*r['size']; dist = cKDTree(resample(L, tn['tuberes']*size)).query(centre)[0]; keep = dist <= radius
+    idx, N = r['idx'][keep], r['N'][keep]
+    if log: log(f'tube: {len(idx)} fine cubes of {r["size"]:.4f} mm within {radius} mm of the line ({len(r["idx"])} in its box), {time.time()-t0:.1f} s')
+    C = centre[keep]
+    if rungs:                                                                   # read the bend only on rungs across the line, one per coarse step
+        Lr = resample(L, tn['rungstep']*cube); T = np.gradient(Lr, axis=0); T /= np.linalg.norm(T, axis=1, keepdims=True)+1e-12
+        dr, jr = cKDTree(Lr).query(C); along = ((C-Lr[jr])*T[jr]).sum(1); at = np.flatnonzero(np.abs(along) <= tn['rungw']*size)
+        turn, d1 = bend(C, N, area, unit, log, at=at, nbh=tn['nbh']); idx, N, C = idx[at], N[at], C[at]
+    else: turn, d1 = bend(C, N, area, unit, log, nbh=tn['nbh'])
+    tree = cKDTree(C); h = tn['cresth']*unit                                              # crest: the bend peaks across the line (read half a unit either side)
+    tp = turn[tree.query(C+h*d1)[1]]; tm = turn[tree.query(C-h*d1)[1]]; crest = (turn >= cut) & (turn >= tp) & (turn >= tm)
+    band = turn >= cut
+    if log: log(f'tube: fine dots {int(band.sum())} (bend >= {cut} deg), crest {int(crest.sum())}')
+    return dict(idx=idx, N=N, lo=r['lo'], size=r['size'], turn=turn, line=band, crest=crest, d1=d1, cut=cut)
 
 
-def refine_all(curves, P, F, log=None, only=None, **kw):
-    """curves: the walk's lines (mm). only: index of one line, or None for all. Returns dict(lines, measured, corners, joints)."""
-    import time
-    kw = {**DEFAULTS, **kw}; idx = [only] if only is not None else list(np.arange(len(curves)))
-    t0 = time.time(); band = Band(P, F, np.vstack([curves[i] for i in idx]), kw['range']+0.6)
-    if log: log(f'refine: {len(idx)} lines, band of {band.n_faces} triangles, {time.time()-t0:.1f} s')
-    lines, measured, corners, joints = [], [], [], []
-    for n, i in enumerate(idx):
-        R, nn = refine_line(np.asarray(curves[i], float), band, **kw); C, cp, jp = fit_curve(R, **kw)
-        lines.append(C); measured.append(R); corners.append(cp); joints.append(jp)
-        if log and (n+1) % 50 == 0: log(f'  refined {n+1} of {len(idx)}, {time.time()-t0:.0f} s')
-    if log: log(f'refine done: {len(lines)} lines, {sum(len(c) for c in corners)} corners, {sum(len(j) for j in joints)} joints, {time.time()-t0:.1f} s')
-    return dict(lines=lines, measured=measured, corners=corners, joints=joints, index=idx)
+def end_lines(curves, i, slack, tree=None, owner=None):
+    """the other walked lines line i's ends sit on: those with a node within `slack` mm of either end point. tree, owner: a
+    cKDTree over all nodes and each node's line (nodes_tree), built once when many lines are asked"""
+    if tree is None: tree, owner = nodes_tree(curves)
+    L = curves[i]; near = set(owner[k] for e in (L[0], L[-1]) for k in tree.query_ball_point(e, slack)); near.discard(i)
+    return sorted(near)
+
+
+def nodes_tree(curves):
+    return cKDTree(np.vstack(curves)), np.repeat(np.arange(len(curves)), [len(c) for c in curves])
+
+
+def slim(t):
+    """the tube reduced to what is kept per line: its dots (centres, mm) and their bend"""
+    C = t['lo']+(t['idx'][t['line']]+0.5)*t['size']; return dict(dots=C.astype(np.float32), turn=t['turn'][t['line']].astype(np.float32), size=t['size'])
+
+
+def avoid(t, others, reach, log=None, res=0.02):
+    """drop the tube's dots within `reach` mm of the lines in `others` (mm): there the bend read mixes two creases"""
+    if not others: return t
+    C = t['lo']+(t['idx']+0.5)*t['size']; near = cKDTree(np.vstack([resample(c, res) for c in others])).query(C)[0] <= reach
+    gone = int((t['line'] & near).sum()); t = dict(t); t['line'] = t['line'] & ~near; t['crest'] = t['crest'] & ~near
+    if log: log(f'end rule: {gone} fine dots within {reach:.3f} mm of {len(others)} end line(s) removed, {int(t["line"].sum())} dots left')
+    return t
+
+
+def refine_line(L, P, F, cube, height, finer=3, radius=0.3, cut=17.0, flat=True, log=None, workers=None, walk=None, area=0.087, unit=0.087, others=(), tune=None):
+    """returns (fine lines in mm from the walk on the tube's dots, the tube). others: the walked lines (mm) this line's ends sit on"""
+    tn = {**TUNE, **(tune or {})}; t = tube(L, P, F, cube, height, finer, radius, cut, flat, log, workers, area, unit, tune=tn)
+    t = avoid(t, list(others), tn['avoidk']*area, log, res=tn['avoidres'])
+    lines = trace4.run(t, log=log or (lambda *_: None), workers=workers, **{**WALK, **(walk or {})})
+    return lines, t
+
+
+_G = {}
+def _init(P, F): _G['P'] = P; _G['F'] = F
+def _task(args):
+    """one line on one core: no process pool inside (starting one per line cost ~5 s, the work is under a second)"""
+    L, others, kw = args; lines, t = refine_line(L, _G['P'], _G['F'], log=None, workers=1, others=others, **kw); return lines, slim(t)
+
+
+def refine_all(curves, P, F, cube, height, log=None, only=None, finer=3, radius=0.3, cut=17.0, flat=True, walk=None, area=0.087, unit=0.087, slack=None, workers=None, tune=None):
+    """curves: the walk's lines (mm). only: index of one line, or None for all. slack: how near (mm) an end must be to another
+    line for it to count as the line the end sits on (default TUNE slack coarse cubes). One line is refined here, with its log; many
+    lines are spread over the cores, one line per core at a time. Returns dict(lines, index, tubes) with tubes slimmed to
+    each line's dots (slim)."""
+    idx = [only] if only is not None else list(range(len(curves))); t0 = time.time(); lines, tubes, index = [], [], []
+    tn = {**TUNE, **(tune or {})}; slack = tn['slack']*cube if slack is None else slack; tree, owner = nodes_tree(curves)
+    kw = dict(cube=cube, height=height, finer=finer, radius=radius, cut=cut, flat=flat, walk=walk, area=area, unit=unit, tune=tn)
+    jobs = [(curves[i], [curves[j] for j in end_lines(curves, i, slack, tree, owner)], kw) for i in idx]
+    workers = workers or os.cpu_count() or 1
+    if len(jobs) == 1:
+        fl, t = refine_line(jobs[0][0], P, F, log=log, workers=1, others=jobs[0][1], **kw); results = [(fl, slim(t))]
+    else:
+        from concurrent.futures import ProcessPoolExecutor
+        results = []
+        with ProcessPoolExecutor(min(workers, len(jobs)), initializer=_init, initargs=(P, F)) as ex:
+            for n, r in enumerate(ex.map(_task, jobs, chunksize=4)):
+                results.append(r)
+                if log and (n+1) % 100 == 0: log(f'  refined {n+1} of {len(jobs)}, {time.time()-t0:.0f} s')
+    for i, (fl, t) in zip(idx, results): lines += fl; tubes.append(t); index += [i]*len(fl)
+    if log: log(f'refine done: {len(idx)} lines -> {len(lines)} fine lines, {time.time()-t0:.1f} s on {1 if len(jobs) == 1 else min(workers, len(jobs))} cores')
+    return dict(lines=lines, index=index, tubes=tubes)
 
 
 def nearest_line(curves, p):

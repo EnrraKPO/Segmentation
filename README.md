@@ -416,10 +416,100 @@ have the same size and sharpness along the path; the eye tells them apart by the
 does not carry. No rule for that yet. The user ended the session confused by the dots; next time start by showing
 only the measured red line on the smooth-shaded surface (`view_smooth.py`), nothing else.
 
-**Integrated (2026-10-21, late):** `refine.py` (stage 3: `refine_all`, `refine_line`, `fit_curve`, `nearest_line`) and
-app group "3. Refine lines": a point field, "Refine one line (nearest the point)", "Refine all lines", curve
-tolerance. Refined curves drawn red over the walk's blue, corners black, joints white; Save writes refined curves in
-place of their walk lines; Dump writes refined.npz. Defaults: planes read in 0.06 / out 0.2 / along 0.05 mm, curve
-tolerance 0.05 mm. Verified: the module reproduces the scratch curve on the rim line exactly (11 joints, 1 corner).
-Speed: ~24 s per line (trimesh closest-point queries in the slice walk); "Refine all" on the full orc is hours. Not
-yet judged on any other line.
+**Not sanctioned (2026-10-21, late; corrected the same night):** the planes method above was integrated as `refine.py` and
+app group 3 (commit 867a352) although the user had asked for a finer voxel grid, not a mesh-based method. The user found this
+out after the fact. That code is gone; the notes above describe a method that was never approved. The brief that was
+approved is the one below.
+
+## Session notes 2026-10-21 (night): refinement by a tube of fine cubes
+
+Brief (agreed, stated back and confirmed step by step): trail one walked line, wrap it in a tube of fine cubes (centres
+within RADIUS of the line), read each fine cube's bend against the surrounding area, the fine dots are the crease, and
+the same walk draws the line through them. No selection of triangles, no planes, no curve fit.
+
+What is in the code now (uncommitted at the end of the session: `refine.py`, `voxel.py`, `trace4.py`):
+- `voxel.run_direct(..., box=)`: cubes are laid only inside a box (mm); a triangle's candidate cubes are clipped to it.
+  Returned `face` ids are global. This is what makes a tube affordable.
+- `refine.tube`: fine cubes (coarse/FINER) within RADIUS of the line; `refine.bend`: per cube the rate of turn of the
+  facing over the surrounding area (shape operator fitted to all cubes within 2*AREA, weights exp(-(d/AREA)^2)), in
+  degrees per UNIT mm so the coarse cut (17) keeps its meaning; dots = bend >= cut; crest = bend peaks across.
+  `rungs=True`: the bend is read only on the fine cubes lying on rungs across the line, two per coarse step (all cubes
+  still count as neighbours). `refine.refine_line` runs `trace4.run` on the tube's dots.
+- `trace4.walk`: every rule that was written in cubes now takes a length in mm (UNIT 0.087: dots touch within 1.8 of
+  it, the across profile is binned by it, self-hit within 1.5 of it, the anchor's across slack SLACK 0.087). At the
+  coarse cube every expression equals the old one, so the coarse walk is unchanged. Found because the walk split the
+  fine line where the dots had no gap: the one-cube slack had shrunk ten times.
+- The app's group 3 still calls the old functions and is broken until rewired. Not done tonight.
+
+What was learned, in order (spot: notch rim line 318 of dump 20261020_144432, point 219.51,167.43,165.39; renders
+in `out/` named tube*, cut_*, neck_*, avoid_*, endB_*, rungs_*, x3_*; scripts in `scratch/20261021_tube/`):
+1. Stage 1's rule (bend against the cube next door) at fine cubes measures single triangle edges: every edge folding
+   more than the cut became a row of dots, slivers doubled the row, side edges made spikes (`tube3_wire.png`). The
+   user's words: compare the bend with the surrounding area. Hence `refine.bend`. With it the band is one even strip
+   about 0.25 mm wide along the crease (`tube4_*`).
+2. Fine walk settings, each a rule the user confirmed: reach = one step (never leave the band), dot say = bend^2
+   (LEVP 2, the sharpest part pulls but every dot counts), trend pull 1 (pull 10 let the trend place 90-100 % of each
+   node and carried the line straight out of the band at the ends). Scratch `run_tube.py` holds them; `refine.py`
+   does not yet.
+3. The ends drift. Diagnosis agreed: within the area's reach (0.17 mm) of another crease the bend read mixes both
+   creases, so the band's tail curls toward the neighbour and the line follows (`tube5/6_kink_*`, `endB_bend.png`).
+   Not the walk's doing. The coarse line being crooked at its ends widens the exposure but does not cause it.
+4. Cutting the line by its own heading change failed: it fires on real curvature (end A cut 2.1 mm early). Cutting
+   thin necks out of the band severed end A's foreign patch but not end B's: there the two creases join at full band
+   width around a sharp convex corner that only looked thin edge-on (`endB_body.png`).
+5. What worked: remove the fine dots within the area's reach (2*AREA = 0.174 mm) of the other walked lines our ends
+   sit on (`avoid_test.py`). Both ends then stop cleanly. Caveat found: a plain distance to every other line also cuts
+   our band where short coarse lines on no visible crease end on ours (10 and 39 nodes here) and splits the line.
+   The user: alien lines are a separate problem. Rule to carry: only the lines our own ends sit on count.
+6. Speed. 10x finer, all cubes read: 268 s per line (230 s bend, 1200 neighbours per reading, one core). Rungs: 69 s,
+   same line within 0.024 mm median. 3x finer with rungs: 3.5 s per line, same line within 0.023 mm median, max
+   0.15 mm at the ends, smoother (max node turn 27 deg). The user judged 3x good enough; finer is a finesse handle.
+   One rung per step broke the walk (the next rung sat at the edge of its reach); two per step is the spacing.
+
+Open for tomorrow: write the fine walk settings and the end-line avoidance into `refine.py`; rewire app group 3
+(settings: finer, radius, area, cut); run on more lines; decide what to do about alien coarse lines; commit.
+
+## Session notes 2026-10-22: tube refinement in the app
+
+- Checked first (user's request): does last night's edit of `trace4.walk` (rules in mm instead of cubes) change the
+  coarse walk? Same dot set (`out/dots/orcfull_patch_0.087mm_cut17_20261020_164845.npz`), app settings: old code
+  3079 lines / 208267 nodes, current code 3078 / 208211. Median node difference 0, a few lines differ (nodes up to
+  0.9 mm from any old one). Cause: the saved cube is 0.08701 mm, so "0.087 mm" and "one cube" differ by 1e-4 and a
+  few borderline decisions flip. User's decision: keep the new code; stage 2's lines are the new set from now on.
+- `refine.py`: fine walk settings in `WALK` (step 0.087, slice 0.7, reach 0.087, pull 1, look 0.45, levp 2, minlen 8);
+  default FINER 3. End rule: `end_lines` = the other walked lines passing within one coarse cube of either end point;
+  `avoid` drops the tube's dots within 2*AREA of them before the walk.
+- App group 3 rewired: settings finer, tube radius, bend area, cut; `refine.refine_all(curves, P, F, cube, height, ...)`.
+  Refined lines drawn red over the walk's blue; on save they replace their walk lines (one line refined into several
+  pieces gives several). Dump writes `refined.npz` with the fine lines and the tubes' dots.
+- Check on line 318 (notch rim, 3x, radius 0.3): 1 fine line, 156 nodes, 4.6 s; same as last night's `tube_3_0.3`
+  within 0.013 mm; both ends stop on the crease (`out/app_refine_A/B/all.png`). Not yet run on all lines.
+- Line picker (user: the typed point refined the wrong line): hovering the viewport picks the line under the cursor
+  (`pick_line`: VTK cell picker on the line actors within PICK_TOL of the cursor; the surface is picked too and a line more
+  than PICK_DEPTH = 0.5 mm behind it is hidden and not taken). Hovered line yellow, a click without drag selects it, green;
+  clicking bare surface clears. 'Refine one line' refines the selected line (a refined line: its walk line again). The
+  point box is gone. Tested on a synthetic sphere offscreen only; not yet in the live app.
+- **Tuning window (user's rule: a constant is a shortcut for a formula; until the formula exists it must be a visible
+  handle, never a number buried in the code).** Every inner constant of the pipeline is now a keyword with its old value
+  as default: `trace4.walk` gained touch, selfhit, backmin, wmem, sphgrow, maxnodes, axismin, cluster; `refine.TUNE`
+  holds nbh, rungstep, rungw, cresth, tuberes, avoidk, avoidres, slack and is threaded through `tube`, `avoid`,
+  `refine_line`, `refine_all`; picking and lifts in the app take their values as arguments. `app.TUNE` lists all 51
+  handles (key, group, label, default, range, meaning); the "Tuning: all constants…" button opens them grouped as Walk,
+  Walk experiments (the backed-out switches, all off), Refine, Fine walk, Display. The main panel keeps its handles.
+  The fine walk takes the Walk group's hidden constants plus its own seven and unit. Checked: the walk on a 12 mm box
+  of the patch dots (5811 dots, 22 lines) is identical to the pre-handle code; line 318 refined is identical to this
+  morning's `out/app_refine_test.npz` (156 nodes, max difference 0.0 mm); the dialog edits reach the stage parameters.
+- Facts established on `out/tube_3_0.3.npz` (line 318): the refine bend reads about half of the stage 1 span on the same
+  crease (stage 1 median 64, refine peak median 32: stage 1 spans two cubes, refine is a rate per one cube fitted over a
+  smooth area), so the tooltip saying the refine cut "has the same meaning as the stage 1 cut" is wrong (not yet changed).
+  At cut 17, 25 % of the tube cubes are dots; on line 318 the peak bend never drops below 17.8, so that line does not
+  show the splitting the user sees on other lines at cut 17 (works at a cut of about 1; no dump of those runs).
+- **Blended cube arrow (`voxel.run_direct(blend=True)`, used by the refine tube only).** A cube holding two or more
+  triangles takes the blend of their facings, each weighted by the area it covers inside the cube (the triangle clipped
+  to the cube, `_tri_in_cube_area`); before, the cube took one side or the other by where its centre fell. Measured first
+  in scratch (`scratch/20261022_blend/blend_test.py`, sample-point areas): on line 318 a third of the tube cubes hold 2+
+  triangles and 2921 arrows change by over 1 deg (up to 68), but after the bend read over the area the result is the
+  same (peak bend per rung and its jumps unchanged, line moved 0.008 mm median). Implemented anyway as the right
+  reading; only the multi-triangle cubes are clipped, after all batches are in (2.1 s vs 1.8 s for the tube's box;
+  clipping everything cost 8.1 s). `check_blend.py` verifies: same cubes and faces, 1 and 8 cores identical, line 318
+  refined 154 nodes, 0.005 mm median from the morning's. Stage 1 keeps blend off.
