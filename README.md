@@ -538,3 +538,126 @@ Open for tomorrow: write the fine walk settings and the end-line avoidance into 
   At cuts 17 and 45 it fills every rounded surface wider than the walk (`out/paint_*`, `out/paint45_*`): a round surface
   turns steadily, so no shift stops the walk, and every cube on it is halfway. A summit needs the turn concentrated near
   the cube, not merely halfway. User: drop it, keep the span dots.
+
+## Session notes 2026-10-22/23: backward smoothing, arc trend, the trail
+
+- **Backward smoothing (layer C)**, `trace4.walk` handles `smooth` (strength), `smoothreach` (nodes), `smoothband`:
+  each new node reaches back down the chain, every earlier node moving toward the midpoint of its neighbours by a share
+  fading with the distance back. Off by default. First built with the fade tied to the trend length: the influence died
+  within a few nodes and the lines changed little (`out/smooth_*_compare.png`). With the reach spanning the line the
+  lines are the straightest so far but more nodes sit off the dots (`out/trend_*_compare.png`). Test:
+  `scratch/20261022_smooth/smooth_test.py`.
+- **Trend as a curve** (`trace4.walk` and `trail`, handle `curve`, app checkbox "Trend as a curve"): an arc (position,
+  direction, steady turn in the length along the chain) fitted by least squares over the nodes, each weighted by how far
+  back it lies, fading over `trend` nodes; continued one step ahead for the anchor and the trend's vote. Measured on
+  today's ring lines, angle between the trend and the true next step (p50 / p90): chord over 6 nodes 4.5 / 10.3; arc
+  reach 6: 2.4 / 7.6; arc reach 20: 4.7 / 11.1; arc over the whole line 9.6 / 38.7 (one arc cannot follow a trail that is
+  not one arc). Default reach 6. `scratch/20261022_smooth/arc_check.py`.
+- **Where the walk's wobble comes from** (measured, `band_jitter.py` and the probe in `walk`): the trend holds about nine
+  tenths of the say on a node (pull 10), and the node lands within a tenth of a cube of the trend's continuation at a
+  typical step; lowering the pull makes the lines wobble more (`out/pull_*_compare.png`). The dots fill the trough of the
+  crease three cubes wide; a band holds ~50 dots, ~18 effectively counting under LEVP 6; the mean moves from node to
+  node because the band has hard edges (rows entering and leaving, the connectivity test), and the anchor's own axis
+  (p90 twenty degrees off the trend) tilts the plane the node is slid onto.
+- **The trail** (`trace4.trail`, app checkbox "Trail: follow the centre of a soft dot window", Tuning group Trail):
+  at each step the walker looks one step ahead through a window fading smoothly along (`talong`) and across (`tacross`)
+  its heading; every dot counts by strength times the fade, nothing is cut. The window's weighted centre places the
+  node across; its principal axis, blended with the trend by `tshare`, is the new heading. Ends: the window's weight
+  below `tfade` of its running level, most of the weight owned by another line (ends on it), self-hit. Dots inside the
+  fade lengths are claimed. Results on the three spots (`out/trail_*_compare.png`, `out/trail_*_fade50_compare.png`,
+  `scratch/20261022_trail/trail_test.py`): the ring becomes two clean continuous curves, the shield's vertical crease one
+  smooth line through the junction; the cost is coasting where the dots thin out (off-band nodes 31 -> 130 on the ring,
+  46 -> 332 on the rim at fade 0.25; about half that at fade 0.5). The end rule is the part to work on next. Both walk
+  methods and both trend methods are selectable independently in the app and reach the fine walk too; the anchored walk
+  with the chord trend reproduces the committed lines exactly.
+
+## Session notes 2026-10-23: session log, why the refined lines scatter, the join stage (bridge.py)
+
+- **Session log on disk** (`app.open_session_log`): every text-box line also goes to `out/log/app_<start>.txt`, flushed at
+  once; `crash_<start>.txt` gets the Python stack if the process dies below Python (faulthandler); uncaught exceptions on
+  the main thread go to the app log. The user's app had closed silently during a refine-all.
+- **Why the refined pieces scatter** (dump `out/debug/20261023_114229`: trail lines, refine all at cut 1, 2146 walk lines
+  -> 5099 pieces, 2972 breaks inside lines, 2002 walk ends on another line of which the refined ends sit a median
+  0.40 mm short). Reruns with the log on (`scratch/20261023_joints/reasons.py`, `noanchor.py`): every break inside a tube
+  is a `no_anchor` end with 30-46 dots 0.044 mm ahead and none inside the 45-degree cone. The fine walk's anchor window is
+  half a step to one step ahead (reach = one step); the bend is read on rungs every half coarse cube, so one rung sheet
+  lies in the window and the cone wants a dot on it within 0.044 mm of the trend line; where the trend crosses the sheet
+  at a slant nothing qualifies. The next seed walks back into the first piece (the `collision` ends). Reach of two
+  steps closes nearly all breaks without moving a node (`handles.py`: line 47 6 -> 1 pieces, line 0 5 -> 2, line 33
+  3 -> 1; node-to-walk-line median 0.07 mm in all cases). The user chose not to change the walk (drift risk, cost of
+  iteration) and to post-process instead. The refine cut: at cut 1 (user's setting) the whole tube is dots and the
+  bend-squared weighting places the node; a cut only removes evidence (the 02:12 dump at cut 17 split line 809 into
+  31 dot clusters before any walk).
+- **Stage 4, `bridge.py`, app group 4 "Join lines"** (brief agreed in conversation): a quadratic in the length along the
+  chain is fitted over each piece end (nodes weighted exp(-(distance back/fade)^2), fade 0.5 mm) and continued forward.
+  A: consecutive pieces of one walk line (ordered along it) are bridged where their extensions pass within `tol_a`
+  (0.1 mm) and point at each other within `ang_a` (30 deg); the bridge is the smooth blend of the two extensions. B:
+  every loose end of every line (walk lines without a piece included; the walk's end record is NOT trusted) is
+  extended up to `max_b` (1.5 mm); the nearest hit within `tol_b` (0.1 mm) wins: another line's body (tee; the bridge
+  is pulled onto its nearest node, shared by both lines) or another end's extension (corner; both meet at one shared
+  point); nothing in reach = loose, marked. C (closing creases that plateau before a region closes, "imaginary
+  creases") is deferred by the user as a later initiative. No measured node moves; each node carries a measured/bridge
+  flag; save writes the joined set with the flags, dump writes `joined.npz`.
+- Result on the dump (`scratch/20261023_joints/bridge_test.py`, renders `out/bridge_20261023_114229_*.png`): 2.9 s;
+  A bridged 589, touching 311, refused 2072; B tees 2906, corners 1286, loose 4244; 3549 shared nodes; ends within one
+  cube of another line 33 % -> 54 %. Bridge nodes sit 0.056 mm (median) from the nearest tube dot, p90 0.21, max
+  2.45 (bridges across bare surface: false joints, accepted by the user for now, to be tuned). Findings on the
+  refusals: 56 % of consecutive piece pairs OVERLAP along the walk line (median 8 walk nodes, p90 90: pieces side by
+  side in one tube, not gaps); A leaves them separate and B tees them, 2736 of the B joints land on a piece of the same
+  walk line. Of the true gaps 44 % are accepted at 0.1 mm / 30 deg; the fit's fade (0.3-2 mm) and degree (1 or 2)
+  and skipping the last 0.1-0.5 mm change that by a few percent only, and the piece ends do not curl (0.063 mm from the
+  walk line against 0.060 for the body): the refused gaps are corners (walk line turns p90 100 deg across the gap) and
+  pieces on different creases, which is B's job. B joints against the walk's end record: agree 602, disagree 2121
+  (mostly those same-walk-line tees), walk had no record 1469.
+- Open: a rule for overlapping / side-by-side pieces of one tube (merge or trim), the user's "merge close parallels"
+  item; tuning of the four tolerances by eye; the false joints across bare surface.
+- **Trajectory rebuilt as a helix (2026-10-23, late afternoon; user's brief after a long discussion).** The parabola over a fixed
+  0.5 mm fade was rejected: it reads only the end's last stretch (the user: "the trajectory of an entire curve cannot be
+  measured at 1 mm") and a parabola cannot be round, so on a ring it leaves the circle at once. Agreed concept: the
+  trajectory is a curve of constant shape fitted to the end's LAST SEGMENT, the segment found by growing back from the end
+  while the nodes still sit on the curve; a sinuous line is a chain of such segments and only the last one matters. Curve
+  = helix (constant bend and twist: straight line, circle, curve round a curved body are all helices; a parabola-shaped
+  crease would need a clothoid term, not added). `bridge.fit_helix`: Levenberg-Marquardt over 8 numbers (end point, two
+  direction angles, one normal angle, bend, twist; closed-form helix in the end's frame, straight line as the limit),
+  started from the circle through three points. `fit_end_helix`: grow by doubling then bisect, criterion = the nodes' rms
+  scatter about the helix within `wobble`. Measured scatter of the refined nodes about a helix over 8 nodes: 0.001 mm
+  median, 0.025 p90 (far smoother than the 0.07 mm node-to-walk-line distance), so wobble default 0.01 mm. Checks: a clean
+  circle is recovered exactly at every segment length; with the real scatter a circle grows to the whole piece and is
+  continued 2 mm ahead within 0.0034 mm; a straight line grows to the whole piece; a sinuous line stops at its last bend.
+  The parabola stays selectable (Tuning `jmodel`). Trajectories of all ends are computed on the cores (`trajectories`).
+  Dump 20261023_114229 with the helix: 135 s; A bridged 546, refused 2115; B tees 2991, corners 1126, loose 4405; bridge
+  nodes to the nearest tube dot p50 0.054, p90 0.185, max 1.28 mm (parabola: 0.056 / 0.208 / 2.45). The counts barely move
+  because the refusals are corners and different creases, not the fit. Renders `out/rivet_para.png`, `out/rivet_helix.png`.
+- Rivet check (`out/bridge_20261023_114229_para_zoom0.png` parabola, `out/bridge_20261023_114229_zoom0.png` helix, frame
+  173.18,143.4,98.66): on this rivet refine left only a short piece (about ten nodes) of the ring; the rest of the ring is
+  the walk line alone. Parabola: the piece's ends were extended round the ring and met a corner 1.5 mm away. Helix: both
+  ends loose. Reason: the only line the extension could meet is the piece's OWN walk line (the unrefined rest of the
+  ring), which B excludes as "own line", and the walk line itself is dropped on save when a piece exists. Open rule: what
+  to do with the unrefined remainder of a walk line (keep it as a line of its own, or let a piece join into it).
+
+## Session notes 2026-10-23 (evening): stage 2b, merging redundant walk lines (merge.py)
+
+- Rule (user's, settled in conversation): two lines are one line wherever averaging them would barely move either, i.e.
+  where a line's nodes lie within MARGIN of the other line; the margin is the walk node's own scatter about its crease
+  (0.07 mm median against the refined line), a handle. No minimum length: a long stretch is one crease walked twice and
+  becomes one shared stretch (their average); a stretch of a node or two is a crossing or a touch and the shared node is
+  the junction record. The longer line keeps the stretch and stays whole; the shorter line's parts outside it become
+  lines of their own ending on the shared node. Passes until nothing qualifies. A tail's end that already sits on its
+  shared node (within a tenth of the margin, since later merges move the node by a hair) is not merged again, which is
+  what made the first version loop forever. App group "2b. Merge redundant lines" (margin handle, button; the merged set
+  replaces the walk lines, shared nodes drawn green on them); refine and join then run on the merged set.
+- Dump 20261023_114229 (`scratch/20261023_joints/merge_test.py`, renders `out/merge_{before,after}_*.png`): 26 s, 7 passes,
+  2146 -> 2244 lines, 183 merges: 91 stretches of 3+ nodes, 92 touches. Nodes with another line within 0.07 mm: 1.7 % ->
+  1.5 %; within 0.2 mm: 5.0 % -> 4.8 %. **The coarse walk lines rarely double.** The side-by-side pieces found in the
+  refined output (56 % of consecutive piece pairs) are made INSIDE the refine stage, several fine pieces in one tube, and
+  this merge does not touch them. The same rule applied to the refined pieces (margin = the fine nodes' scatter) would;
+  not built, not agreed.
+- **Stage 3b, the same merge on the refined pieces** (user: odd that refine yields duplicates, but merge them too, as a
+  separate step). Measured first: 23 608 overlapping piece pairs within one walk line (3+ nodes within 0.3 mm), separation
+  over the overlap 0.034 mm median (22 % under 0.02, 63 % 0.02-0.1, 15 % 0.1-0.3), overlap length 1.1 mm median: true
+  duplicates of one crease. `merge.run(..., labels=)` carries each piece's walk index through; app group "3b. Merge
+  duplicate pieces", margin default 0.05 mm (basis: the refinement's own uncertainty, 3x vs 10x finer differ 0.023 mm
+  median, 0.15 max). Dump: 29 s, 31 passes, 5099 -> 4530 pieces, 338k -> 323k nodes, 3823 merges (1666 stretches, 2157
+  touches); overlapping pairs 23 608 -> 1 443. Join on the merged pieces: A bridged 569, refused 1379 (was 2075), B tees
+  1491 (was 2991), corners 1122, loose 4437, 3525 lines. Why refine makes duplicates is not yet looked into (at cut 1 the
+  whole tube is dots; a second seed inside the tube walks the same crease again).

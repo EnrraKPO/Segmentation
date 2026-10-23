@@ -29,6 +29,8 @@ def walk(X, wgt, N, size, log=print, **kw):
     along = kw.get('along', 0.0)/size or reach   # ALONG: falloff (mm) of the along-score around one step; default = reach (the two roles coupled, as before)
     pull = kw.get('pull', 10.0); afall = kw.get('afall', 2.0); astr = kw.get('astr', 0.0)   # A: trend weight on the node; B: score falloff (cubes) off the centre line, strength exponent
     minlen = int(kw.get('minlen', 8)); owned_frac = kw.get('owned', 0.5); valley = kw.get('valley', 1.3); core_frac = kw.get('core', 0.0); grow = kw.get('grow', 99.0); lead_k = kw.get('lead', 0.0); lead_min = int(kw.get('leadmin', 8)); fringe = kw.get('fringe', 1.0) > 0; ridge = kw.get('ridge', 0.0) > 0; sparse = kw.get('sparse', 0.0); hill = kw.get('hill', 0.0) > 0
+    smooth = kw.get('smooth', 0.0); smoothband = kw.get('smoothband', 0.0) > 0; smooth_n = max(float(kw.get('smoothreach', 100)), 1e-9)   # SMOOTH: backward smoothing strength (0 = off): each new node pulls the earlier nodes toward the midpoint of their neighbours, fading over SMOOTHREACH nodes; SMOOTHBAND: the pull slides a node only across its band and fades beyond the band's half-width
+    curve = kw.get('curve', 1) > 0   # CURVE: the trend is an arc fitted over the chain (nodes weighted by recency, fading over TREND nodes), continued one step ahead; off: the chord over the last TREND nodes
     touch = kw.get('touch', 1.8); selfhit = kw.get('selfhit', 1.5); back_min = int(kw.get('backmin', 15)); wmem = kw.get('wmem', 0.7); sphgrow = kw.get('sphgrow', 3.0); maxnodes = int(kw.get('maxnodes', 20000)); axismin = int(kw.get('axismin', 4))   # TOUCH: dots touch within this many units (cube diagonal 1.73); SELFHIT: a line hits itself within this many units; BACKMIN: at least this many latest nodes ignored for the self-hit; WMEM: share of the old band width kept per node; SPHGROW: axis sphere grows to this times the band width; MAXNODES: cap per half line; AXISMIN: dots needed for an axis
     walk.probe = []
     tree = cKDTree(X); n = len(X); owner = np.full(n, -1); lines = []; node_tree = None; node_owner = np.zeros(0, int); all_nodes = np.zeros((0, 3))
@@ -109,6 +111,36 @@ def walk(X, wgt, N, size, log=print, **kw):
         if lead_k <= 0 or len(bd) < 4: return w
         lead = 1-np.median(w)/top
         return np.maximum(w-min(lead_k*lead, 0.95)*top, 0)      # the strongest dot always keeps a say
+    def smooth_back(nodes, bands, prev0):
+        """layer C: the newest node reaches back down the whole chain. Each earlier node moves toward the midpoint of its
+        two neighbours (at their current positions, so the move carries on down the chain) by a share that fades with the
+        distance back, over SMOOTHREACH nodes. prev0: the seed's other neighbour (the other half's second node), or None
+        when the seed is to stay. bands[j] = (across direction, half-width, band centre) of node j."""
+        k = len(nodes)-1
+        for j in range(k-1, -1, -1):
+            if j == 0 and prev0 is None: break
+            a = nodes[j-1] if j > 0 else prev0; target = 0.5*(a+nodes[j+1]); move = smooth*np.exp(-(k-j)/smooth_n)*(target-nodes[j])
+            if smoothband and bands[j] is not None:
+                u, half, centre = bands[j]; move = (move @ u)*u                    # across the band only
+                off = (nodes[j]+move-centre) @ u; move = move*np.exp(-(off/max(half, 1e-9))**2)   # and fading beyond the band's half-width
+            nodes[j] = nodes[j]+move
+
+    def trend_at(nodes, d_prev):
+        """the trend read from the chain: an arc (position, direction and steady turn, in the length along the chain)
+        fitted by least squares over the nodes, each node weighted by how far back it lies (fading over TREND nodes), so the
+        arc hugs the recent nodes and only passes near the old ones. Returns the direction at the end and a function giving
+        the arc's point a given length ahead. Fewer than three nodes: the chord."""
+        P = np.array(nodes); k = len(P)-1
+        if not curve or k < 2:
+            kk = min(trend_n, k); d = P[-1]-P[-1-kk] if kk > 0 else d_prev; d = d/(np.linalg.norm(d)+1e-12)
+            return d, lambda t: P[-1]+t*d
+        seg = np.linalg.norm(np.diff(P, axis=0), axis=1); t = np.concatenate([[0.0], np.cumsum(seg)]); t = t-t[-1]   # length along the chain, 0 at the end
+        w = np.exp(-(k-np.arange(k+1))/trend_n); A = np.stack([np.ones(k+1), t, t*t], 1)*w[:, None]
+        coef = np.linalg.lstsq(A, P*w[:, None], rcond=None)[0]                        # rows: point at the end, direction there, half the turn
+        a0, b, c = coef; d = b/(np.linalg.norm(b)+1e-12)
+        if d @ d_prev < 0: d = -d
+        return d, lambda tt: a0+b*tt+c*tt*tt
+
     def finish(line, tid, claimed):
         if len(line) < minlen: owner[claimed] = -1; stats['short'] += 1; return
         lines.append(np.array(line))
@@ -119,13 +151,14 @@ def walk(X, wgt, N, size, log=print, **kw):
         if h is None: stats['uncertain'] += 1; continue
         band = band_at(s, h)
         if band is None: continue
-        bd, bw, _, bc = band
+        bd, bw, u0, bc = band
         if ((owner[bd] != -1) & (owner[bd] != tid)).mean() > owned_frac: continue      # that line is drawn already
         level0 = float(wgt[bc].max()); w0 = node_w(bc, level0); p0 = (X[bc]*w0[:, None]).sum(0)/w0.sum(); p0 = X[s]+(p0-X[s])-((p0-X[s]) @ h)*h; claimed = list(bd); owner[bd] = tid
         halves = []; back = max(int(2*slice_h/step)+3, back_min)
         reasons = []; ends_at = []; halves_w = []
         for sign in (1, -1):
-            nodes = [p0]; d = sign*h; width = bw; widths = []; level = level0
+            nodes = [halves[0][0] if halves else p0]; bands = [(u0, 0.5*bw, p0.copy())]; d = sign*h; arc = (lambda dd: (lambda t: nodes[-1]+t*dd))(d); width = bw; widths = []; level = level0
+            prev0 = halves[0][1] if halves and len(halves[0]) > 1 else None        # second half: the seed's other neighbour is the first half's second node
             while True:
                 # anchor: strongest dot about one step ahead along the trend, within the band's width (own dots allowed:
                 # slices overlap along the line; dots of another line mean a collision)
@@ -147,15 +180,16 @@ def walk(X, wgt, N, size, log=print, **kw):
                 elif ha @ d < 0: ha = -ha
                 band = band_at(a, ha, expect=width)
                 if band is None: reasons.append('no_band'); ends_at.append((X[a] if 'a' in dir() else q).copy()); break
-                bd, bw, _, bc = band
+                bd, bw, ua, bc = band
                 ow = owner[bd]; foreign = (ow != -1) & (ow != tid)
                 if foreign.mean() > owned_frac:                                        # band already another line's: end on it
                     j = int(np.bincount(ow[foreign]).argmax()); stats['collision'] += 1; reasons.append('band_owned'); ends_at.append(X[a].copy()); other = lines[j]; dn = np.linalg.norm(other-X[a], axis=1)
                     if dn.min() <= 0.5*width+slack: nodes.append(other[int(dn.argmin())])
                     break
                 wn = node_w(bc, level); level += ((wn*wgt[bc]).sum()/wn.sum()-level)/levn; pn = (X[bc]*wn[:, None]).sum(0)/wn.sum(); pn = X[a]+(pn-X[a])-((pn-X[a]) @ ha)*ha   # node: anchor moved across the band only
+                pc = pn.copy()                                                          # the band's centre, before the trend's pull (kept for the bound smoothing)
                 if pull > 0 or look > 0:                                                # A: the trend's prediction votes too
-                    pred = nodes[-1]+((X[a]-nodes[-1]) @ d)*d; pred = X[a]+(pred-X[a])-((pred-X[a]) @ ha)*ha
+                    pred = arc((X[a]-nodes[-1]) @ d); pred = X[a]+(pred-X[a])-((pred-X[a]) @ ha)*ha   # the trend continued to the anchor's distance ahead
                     f = pull/(1+pull)                                                   # fixed share of the trend's say
                     if look > 0:                                                        # LOOK: probe ahead; the candidate with dot support ahead of it wins
                         dl, pl = d, pred
@@ -164,15 +198,16 @@ def walk(X, wgt, N, size, log=print, **kw):
                         st = support(pl, dl); sa = support(pn, ha)
                         if st > sa: pred = pl                                           # the long trend wins: the node goes back onto it
                         if st+sa > 0: f = pull*st/(pull*st+sa); stats['look_trend' if f > 0.8 else 'look_dots' if f < 0.2 else 'look_mixed'] += 1
-                        walk.probe.append((f, st, sa, float(np.linalg.norm(pn-pred))))
+                        walk.probe.append((f, st, sa, float(np.linalg.norm(pn-pred)), float(np.degrees(np.arccos(np.clip(abs(ha @ d), 0, 1)))), float(np.linalg.norm(pred-(nodes[-1]+((X[a]-nodes[-1]) @ d)*d))), float(np.linalg.norm(((1-f)*pn+f*pred)-(nodes[-1]+((X[a]-nodes[-1]) @ d)*d)))))
                     pn = (1-f)*pn+f*pred
                 old = np.array(nodes[:-back]) if len(nodes) > back else None
                 if old is not None:
                     dist = np.linalg.norm(old-pn, axis=1); kmin = int(np.argmin(dist))
                     if dist[kmin] < selfhit*unit: stats['self_hit'] += 1; reasons.append('loop'); ends_at.append((X[a] if 'a' in dir() else q).copy()); nodes.append(old[kmin]); break   # the ring has come round onto itself
                 free = bd[ow == -1]; owner[free] = tid; claimed.extend(free)
-                nodes.append(pn); width = wmem*width+(1-wmem)*bw; widths.append((bw, float(np.linalg.norm(pn-X[a])), len(bd), ha_from_dots))
-                k = min(trend_n, len(nodes)-1); d = nodes[-1]-nodes[-1-k]; d /= np.linalg.norm(d)+1e-12
+                nodes.append(pn); bands.append((ua, 0.5*bw, pc)); width = wmem*width+(1-wmem)*bw; widths.append((bw, float(np.linalg.norm(pn-X[a])), len(bd), ha_from_dots, float(wn.sum()**2/((wn**2).sum()+1e-12))))
+                if smooth > 0: smooth_back(nodes, bands, prev0)                        # layer C: the new node reaches back down the chain
+                d, arc = trend_at(nodes, d)
                 if len(nodes) > maxnodes: break
             halves.append(nodes); halves_w.append(widths)
         line = halves[1][::-1]+halves[0][1:]
@@ -185,9 +220,88 @@ def walk(X, wgt, N, size, log=print, **kw):
     return lines, owner
 
 
+def trail(X, wgt, N, size, log=print, **kw):
+    """The trail (2026-10-23): the crease followed as the centre of a soft window of dots. The walker stands at a point
+    heading d and looks at the dots around the point one step ahead through a window that fades smoothly along the heading
+    (TALONG) and across it (TACROSS): every dot counts by its strength times the window's fade, nothing is cut. The window's
+    weighted centre is the crease there and sets the node's position across; the window's weighted principal axis is the
+    dots' direction there, blended with the chain's trend (arc or chord, as the walk's CURVE/TREND say) by TSHARE. A line
+    ends when the window's weight falls below TFADE of its running level (the dots run out), when most of its weight belongs
+    to another line (it ends on that line), or when it comes round onto itself. Dots inside the window's fade lengths are
+    claimed. Same inputs and outputs as walk()."""
+    step = kw.get('step', 0.087)/size; along = kw.get('talong', 0.7)/size; across = kw.get('tacross', 0.35)/size
+    tshare = kw.get('tshare', 0.5); trend_n = max(float(kw.get('trend', 6)), 1e-9); curve = kw.get('curve', 1) > 0; fade = kw.get('tfade', 0.25); levn = kw.get('levn', 6)
+    owned = kw.get('owned', 0.5); minlen = int(kw.get('minlen', 8)); align = kw.get('align', 1.5); unit = kw.get('unit', 0.087)/size
+    selfhit = kw.get('selfhit', 1.5)*unit; back_min = int(kw.get('backmin', 15)); maxnodes = int(kw.get('maxnodes', 20000))
+    n = len(X); tree = cKDTree(X); owner = np.full(n, -1); lines = []; stats = dict(faded=0, collision=0, self_hit=0, short=0, no_axis=0)
+    R = 3*max(along, across)
+
+    def window(q, d):
+        """dots around q weighted by the window along d: returns indices, weights"""
+        nb = np.array(tree.query_ball_point(q, R), int)
+        if len(nb) == 0: return nb, np.zeros(0)
+        off = X[nb]-q; al = off @ d; ac = np.linalg.norm(off-al[:, None]*d, axis=1)
+        return nb, wgt[nb]*np.exp(-(al/along)**2)*np.exp(-(ac/across)**2)
+
+    def axis(nb, w, c):
+        """weighted principal axis of the dots about c, or None when the dots have no clear direction"""
+        if w.sum() <= 0: return None
+        off = (X[nb]-c)*np.sqrt(w)[:, None]; ev, vec = np.linalg.eigh(off.T @ off)
+        if ev[-1] < align*align*max(ev[-2], 1e-9): return None
+        return vec[:, -1]
+
+    def trend_at(nodes, d_prev):
+        P = np.array(nodes); k = len(P)-1
+        if k < 1: return d_prev
+        if not curve or k < 2:
+            kk = min(int(round(trend_n)), k); d = P[-1]-P[-1-kk] if kk > 0 else d_prev; return d/(np.linalg.norm(d)+1e-12)
+        seg = np.linalg.norm(np.diff(P, axis=0), axis=1); t = np.concatenate([[0.0], np.cumsum(seg)]); t = t-t[-1]
+        w = np.exp(-(k-np.arange(k+1))/trend_n); A = np.stack([np.ones(k+1), t, t*t], 1)*w[:, None]
+        b = np.linalg.lstsq(A, P*w[:, None], rcond=None)[0][1]; d = b/(np.linalg.norm(b)+1e-12)
+        return d if d @ d_prev >= 0 else -d
+
+    for s in np.argsort(-wgt):
+        if owner[s] != -1: continue
+        tid = len(lines)
+        nb = np.array(tree.query_ball_point(X[s], R), int); w = wgt[nb]*np.exp(-(np.linalg.norm(X[nb]-X[s], axis=1)/along)**2)   # the seed's window: a sphere
+        c0 = (X[nb]*w[:, None]).sum(0)/w.sum(); h = axis(nb, w, c0)
+        if h is None: stats['no_axis'] += 1; continue
+        claimed = []; halves = []
+        for sign in (1, -1):
+            nodes = [c0]; d = sign*h; level = None; back = max(int(2*along/step)+3, back_min)
+            while True:
+                q = nodes[-1]+step*d; nb, w = window(q, d); tot = float(w.sum())
+                if level is None: level = tot
+                if tot <= 0 or tot < fade*level: stats['faded'] += 1; break
+                level += (tot-level)/levn
+                ow = owner[nb]; foreign = (ow != -1) & (ow != tid)
+                if w[foreign].sum() > owned*tot:                                        # most of the weight belongs to another line: end on it
+                    j = int(np.bincount(ow[foreign], weights=w[foreign]).argmax()); other = lines[j]; dn = np.linalg.norm(other-q, axis=1)
+                    if dn.min() <= 2*across: nodes.append(other[int(dn.argmin())])
+                    stats['collision'] += 1; break
+                c = (X[nb]*w[:, None]).sum(0)/tot; e = axis(nb, w, c)
+                if e is not None and e @ d < 0: e = -e
+                dt = trend_at(nodes, d); dn_ = (1-tshare)*(e if e is not None else dt)+tshare*dt; dn_ /= np.linalg.norm(dn_)+1e-12
+                pn = q+((c-q)-((c-q) @ dn_)*dn_)                                       # one step ahead, at the crease centre across
+                old = np.array(nodes[:-back]) if len(nodes) > back else None
+                if old is not None:
+                    dist = np.linalg.norm(old-pn, axis=1); kmin = int(np.argmin(dist))
+                    if dist[kmin] < selfhit: stats['self_hit'] += 1; nodes.append(old[kmin]); break
+                mine = nb[(ow == -1) & (w >= np.exp(-1.0)*wgt[nb])]                     # claim the dots inside the window's fade lengths
+                owner[mine] = tid; claimed.extend(mine)
+                nodes.append(pn); d = dn_
+                if len(nodes) > maxnodes: break
+            halves.append(nodes)
+        line = halves[1][::-1]+halves[0][1:]
+        if len(line) < minlen: owner[claimed] = -1; stats['short'] += 1; continue
+        lines.append(np.array(line))
+    if log: log(f'trail: lines {len(lines)}, nodes {sum(len(l) for l in lines)}, dots unclaimed {int((owner == -1).sum())} of {n}; ends: {stats}')
+    return lines, owner
+
+
 def _task(t):
     X, wgt, N, size, kw = t
-    lines, owner = walk(X, wgt, N, size, log=lambda *_: None, **kw)
+    lines, owner = (trail if kw.get('trail', 0) > 0 else walk)(X, wgt, N, size, log=lambda *_: None, **kw)
     return lines, int((owner == -1).sum())
 
 
@@ -223,8 +337,8 @@ def run(res, log=print, **kw):
 def main():
     G, outp = sys.argv[1], sys.argv[2]; g = np.load(G); line = g['line']; size = float(g['size']); cut = float(g['cut']) if 'cut' in g.files else 17.0
     X = (g['idx'][line]+0.5).astype(float); wgt = (np.maximum(g['turn'][line]-cut, 0)+1e-3)**env('WPOW', 1.0); N = g['N'][line]   # WPOW: how aggressively strong dots outweigh weak ones
-    kw = {k.lower(): env(k, d) for k, d in [('STEP', 0.087), ('SLICE', 0.7), ('SPHERE', 0.7), ('WMAX', 1.0), ('ALIGN', 1.5), ('TREND', 6), ('CONE', 45), ('MINLEN', 8), ('OWNED', 0.5), ('VALLEY', 1.3), ('CORE', 0.0), ('GROW', 99), ('PULL', 10.0), ('AFALL', 2.0), ('ASTR', 0.0), ('HILL', 0), ('REACH', 0.22), ('ALONG', 0.0), ('LOOK', 0.35), ('LOOKW', 1.0), ('LOOKN', 0), ('LEVP', 6.0), ('LEVN', 6), ('LEAD', 0.0), ('LEADMIN', 8), ('FRINGE', 1), ('RIDGE', 0), ('SPARSE', 0)]}
-    t0 = time.time(); lines = walk_all(X, wgt, N, size, **kw) if env('PAR', 1) > 0 else walk(X, wgt, N, size, **kw)[0]; print(f'{time.time()-t0:.1f} s')
+    kw = {k.lower(): env(k, d) for k, d in [('STEP', 0.087), ('SLICE', 0.7), ('SPHERE', 0.7), ('WMAX', 1.0), ('ALIGN', 1.5), ('TREND', 6), ('CONE', 45), ('MINLEN', 8), ('OWNED', 0.5), ('VALLEY', 1.3), ('CORE', 0.0), ('GROW', 99), ('PULL', 10.0), ('AFALL', 2.0), ('ASTR', 0.0), ('HILL', 0), ('REACH', 0.22), ('ALONG', 0.0), ('LOOK', 0.35), ('LOOKW', 1.0), ('LOOKN', 0), ('LEVP', 6.0), ('LEVN', 6), ('LEAD', 0.0), ('LEADMIN', 8), ('FRINGE', 1), ('RIDGE', 0), ('SPARSE', 0), ('SMOOTH', 0.0), ('SMOOTHBAND', 0), ('SMOOTHREACH', 100), ('CURVE', 1), ('TRAIL', 0), ('TALONG', 0.7), ('TACROSS', 0.35), ('TSHARE', 0.5), ('TFADE', 0.25)]}
+    t0 = time.time(); lines = walk_all(X, wgt, N, size, **kw) if env('PAR', 1) > 0 else (trail if kw['trail'] > 0 else walk)(X, wgt, N, size, **kw)[0]; print(f'{time.time()-t0:.1f} s')
     cv = [g['lo']+l*size for l in lines]
     np.savez(outp, n=np.array([len(c) for c in cv]), pts=np.vstack(cv) if cv else np.zeros((0, 3))); print('saved', outp)
 

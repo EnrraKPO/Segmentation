@@ -45,7 +45,17 @@ Defaults in `trace4.py`: SLICE 0.7, REACH 0.22, PULL 1, AFALL 2, ASTR 0, HILL 0,
 
 Not solved: the rivet. Its lines do not follow the geometry. Weak-dot filtering inside the band (LEAD) was tried
 and backed out.
-Also open: hooks at line ends, junction region C, backward smoothing (layer C).
+Also open: hooks at line ends, junction region C.
+
+## Layer C and the trend (2026-10-22/23)
+
+Backward smoothing (layer C) is built: handles `smooth`, `smoothreach`, `smoothband` in `trace4.walk`, off by default.
+Each new node reaches back down the chain and every earlier node moves toward the midpoint of its neighbours by a share
+fading with the distance back. It straightens the lines but cannot fix a trend that steers wrong, so the trend was
+rebuilt: an arc fitted over the chain with recency weights (handle `curve`, app checkbox), the chord kept as the
+alternative. The anchored walk's remaining wobble comes from the band's hard edges and the anchor's axis tilting the
+node's plane (README 2026-10-22/23); a second method, the trail (`trace4.trail`), follows the centre of a soft window
+of dots instead and is selectable beside the walk.
 
 ## Open questions to test
 

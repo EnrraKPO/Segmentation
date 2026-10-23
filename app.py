@@ -1,14 +1,26 @@
 """Segmentation tool. Two stages, each run on its own and kept:
   1. Find dots   : cubes over the surface, each reading its own triangle's facing; a dot where the facing shift
                    changes sharply from one cube to the next (creases.find_dots). Parameters: cube size (mm), cut.
+  2b. Merge lines: wherever two walk lines lie within the margin of each other (a walk node's own scatter, 0.07 mm) the
+                   stretch becomes one shared stretch, their average; the rest of each line continues from it (merge.py).
+                   A long stretch is one crease walked twice; a stretch of a node is a crossing, and the shared node is
+                   the junction. Runs on the walk lines, before refine, and replaces them.
   3. Refine lines: a tube of fine cubes is laid around each line (refine.py), each fine cube's bend read over the
                    surrounding area, the fine dots are the crease, and the same walk draws the line through them.
                    Parameters: finer (times smaller than the coarse cube), tube radius (mm), area (mm), cut. The line
                    to refine is picked in the viewport: hover highlights the line under the cursor, a click selects it.
+  3b. Merge pieces: the same merge on the refined pieces (several fine pieces of one tube retrace one crease, 0.03 mm
+                   apart); margin = the refinement's own uncertainty. The merged pieces replace the refined set.
+  4. Join lines  : the refined pieces are bridged and the joints sought (bridge.py): the trajectory at each piece end (a
+                   helix fitted over the last segment the nodes still sit on) is continued forward; consecutive pieces of one walk line are joined where their extensions meet (A), and
+                   every loose end is extended to the nearest line body or meeting extension within reach (B), those nodes
+                   becoming shared. No measured node moves. Parameters in mm: meeting tolerance and longest gap (A), reach
+                   tolerance and longest reach (B).
   2. Build lines : anchored walk (trace4.walk): from the strongest free dot, read the band of connected dots in a thin
                    slice across it, place a node, step along the line's trend to the next anchor; lines end on other
-                   lines. Parameters in mm: step, slice, reach; trend pull; min length. The old thick-stroke method
-                   (creases.strokes + creases.join) stays selectable for comparison.
+                   lines. Parameters in mm: step, slice, reach; trend pull; min length. Or the trail (trace4.trail,
+                   checkbox): the crease followed as the centre of a soft window of dots. The trend is an arc or a
+                   chord (checkbox). The old thick-stroke method (creases.strokes + creases.join) stays selectable.
 Run: python app.py (from this folder)."""
 import os, sys, time, traceback
 import numpy as np, trimesh
@@ -16,7 +28,7 @@ from PySide6 import QtCore, QtWidgets
 import pyvista as pv
 from pyvistaqt import QtInteractor
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-import creases, trace4, refine
+import creases, trace4, refine, bridge, merge
 
 
 def pick_line(plotter, act_mesh, drawn, x, y, tol=0.006, depth_mm=0.5):
@@ -40,6 +52,25 @@ def pick_line(plotter, act_mesh, drawn, x, y, tol=0.006, depth_mm=0.5):
 
 
 DOTS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'out', 'dots')   # saved dot sets; last.json maps model name -> last file
+LOG_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'out', 'log')     # one log file per session, written as it happens
+
+
+def open_session_log():
+    """Three records of the session on disk, so a crash that takes the window down leaves its trace (2026-10-23):
+    app_<start>.txt gets every line the text box shows, flushed at once; crash_<start>.txt gets the Python stack if the
+    process is killed from below Python (faulthandler: segfault, abort); uncaught exceptions on the main thread go to the
+    app log too. Returns (log function, path of the app log)."""
+    import faulthandler
+    os.makedirs(LOG_DIR, exist_ok=True); stamp = time.strftime('%Y%m%d_%H%M%S')
+    path = os.path.join(LOG_DIR, f'app_{stamp}.txt'); f = open(path, 'a', encoding='utf-8')
+    crash = open(os.path.join(LOG_DIR, f'crash_{stamp}.txt'), 'w'); faulthandler.enable(file=crash, all_threads=True)
+    def write(s):
+        try: f.write(time.strftime('%H:%M:%S ')+s+'\n'); f.flush()
+        except Exception: pass
+    def hook(t, v, tb): write('uncaught exception on the main thread:\n'+''.join(traceback.format_exception(t, v, tb))); sys.__excepthook__(t, v, tb)
+    sys.excepthook = hook
+    write(f'session started, python {sys.version.split()[0]}, pid {os.getpid()}')
+    return write, path
 
 
 def save_dots(res, model, cube, cut, flat, blend=True):
@@ -97,6 +128,8 @@ TIPS = dict(
     minlen="Strokes with fewer nodes than this are dropped. One node per cube.",
     method="Anchored walk: the new line stage (see docs/brief_anchored_walk.md). Thick strokes: the previous method, kept for comparison.",
     step="Distance between nodes along the line, in mm. About one cube.",
+    trail="On: the trail (trace4.trail, 2026-10-23). At every step the walker looks one step ahead through a window that fades smoothly along and across its heading; every dot counts by its strength times the fade, nothing is cut. The window's centre is the crease and places the node; its principal axis, blended with the trend, is the new heading. Lines end where the dots run out (fade share), on another line, or on themselves. Off: the anchored walk (band of connected dots in a slice, anchor one step ahead). Window and fade handles in Tuning, group Trail; applies to the fine walk too.",
+    curve="On: the trend is an arc (steady turn) fitted over the chain, each node weighted by how far back it lies (Tuning: trend reach), continued one step ahead. Off: the straight chord over the last nodes. Used by both methods, and by the fine walk.",
     slice="Half-length, in mm, of the slice across the band that each node averages. Longer = smoother nodes, but a long slice blurs tight corners.",
     look="Probe length in mm, 0 = off. Before each node, two corridors this long are probed for dots: one continuing the trend, one along the local dot axis. Dot support ahead scales the trend pull: the trend wins where the dots continue along it, the dots win where the trend leads onto bare surface.",
     levp="0 = off. Each line keeps a running standard, the typical strength of the dots it follows. A dot's say is (strength / standard) to this power, capped at 1: with power 6 a dot 10 % below the standard has half a say, one 50 % below almost none. Weak dots lead only where nothing stronger is there.",
@@ -108,6 +141,15 @@ TIPS = dict(
     radius="Half-width of the tube around the walked line, in mm. Must hold the crease's band with room for the line to move.",
     area="Width in mm of the neighbourhood over which each fine cube's bend is read, smooth weights. The coarse cube: the cut keeps its meaning.",
     rcut="Bend, in degrees per coarse cube, a fine cube needs to be a dot. Same meaning as the stage 1 cut.",
+    margin="Two walk lines within this distance of each other are one line there: the stretch is replaced by their average and the rest of each line continues from it. Default = the walk node's measured scatter about its crease (0.07 mm median against the refined line). Larger merges real neighbouring creases (a bevel's two edges sit about 0.25 mm apart).",
+    merge="Replaces the walk lines by the merged set (Build lines again to get the originals back). Shared nodes are drawn green on the walk lines. Refine and Join then run on the merged lines.",
+    rmargin="Refined pieces within this distance of each other are one piece there (the same rule as 2b). Default 0.05 mm: the refinement's own uncertainty, measured as the difference between a line refined 3x and 10x finer (0.023 mm median, 0.15 max); duplicate pieces in one tube sit 0.034 mm apart at the median.",
+    rmerge="Replaces the refined pieces by the merged set (Refine again to get the originals back). Each merged piece keeps the walk line it came from, so Join lines still knows the pieces of one walk line.",
+    tol_a="A: two consecutive pieces of one walk line are joined when their extended curves pass within this distance of each other (and agree in direction, Tuning: angle).",
+    max_a="A: gaps between consecutive pieces longer than this are not bridged; the ends go to B.",
+    tol_b="B: an extended loose end reaches a line body, or another end's extension, when it passes within this distance.",
+    max_b="B: how far a loose end is extended at most. Longer finds more joints and more false ones across bare surface.",
+    join="Runs A then B on the refined pieces plus the walk lines that have no piece. Draws measured nodes dark red, bridges magenta, loose ends black, shared nodes green. The walk's own end record is not trusted; every line is a candidate, and the log reports where the joints agree with it.",
     snap="Moves each node onto the nearest surface point before drawing, so lines on sharp convex edges are not hidden inside the solid. Judge placement with this on; lifting lines off the surface shifts them sideways.",
 )
 
@@ -122,7 +164,7 @@ TUNE = [
     ('align', 'Walk', 'Alignment ratio (long/wide)', 1.5, 1, 10, 0.1, 2, 'The dots in the sphere must spread at least this many times more along the axis than across it, else the axis is uncertain and the trend carries the line (or the seed is dropped).'),
     ('axismin', 'Walk', 'Dots needed for an axis', 4, 2, 100, 1, 0, 'Fewer dots than this in the sphere: no axis.'),
     ('cone', 'Walk', 'Anchor cone (deg)', 45, 1, 90, 1, 0, 'The next anchor must lie within this angle of the trend direction, seen from the last node.'),
-    ('trend', 'Walk', 'Trend length (nodes)', 6, 1, 100, 1, 0, 'The trend direction is the chord over this many latest nodes.'),
+    ('trend', 'Walk', 'Trend reach (nodes)', 6, 1, 1000, 1, 0, 'Curve trend: an arc fitted over the chain, each node weighted by how far back it lies, fading over this many nodes, so the arc hugs the recent nodes and only passes near the old ones. Chord trend: the straight line over this many latest nodes.'),
     ('afall', 'Walk', 'Anchor score falloff (cubes)', 2.0, 0.1, 50, 0.1, 1, 'A candidate anchor this many cubes off the trend line scores 1/e; the best score wins.'),
     ('along', 'Walk', 'Along-score falloff (mm, 0 = reach)', 0.0, 0, 5, 0.01, 3, 'A candidate anchor this far from one step ahead scores 1/e along; 0 couples it to the reach.'),
     ('slack', 'Walk', 'Anchor slack beyond band half-width (mm)', 0.087, 0, 2, 0.01, 3, "How far beyond the band's half-width the next anchor may sit off the trend line."),
@@ -136,6 +178,14 @@ TUNE = [
     ('lookw', 'Walk', 'Look-ahead corridor half-width (cubes)', 1.0, 0.1, 20, 0.1, 1, 'Half-width of the probe corridors; dots near the corridor centre line count most.'),
     ('cluster', 'Walk', 'Cluster radius (units)', 3.0, 1, 50, 0.5, 1, 'Dots within this many units (or reach + one unit, whichever is larger) are one cluster; each cluster is walked on its own core and lines never cross clusters.'),
     ('maxnodes', 'Walk', 'Node cap per half line', 20000, 10, 10000000, 1000, 0, 'A half line stops after this many nodes.'),
+    ('smooth', 'Walk', 'Backward smoothing strength', 0.0, 0, 1, 0.05, 2, 'Layer C (2026-10-22). 0 = off. Each new node reaches back down the chain: every earlier node moves toward the midpoint of its two neighbours by this share, fading with the distance back over the smoothing reach; each adjusted node carries the influence of the ones adjusted after it. The trend for the next step is read from the smoothed nodes.'),
+    ('smoothreach', 'Walk', 'Smoothing reach (nodes)', 100, 1, 1000, 1, 0, 'How far back down the chain the influence of a new node fades: the share drops to a third over this many nodes. Long = the whole line is levelled.'),
+    ('smoothband', 'Walk', 'Smoothing bound to the band (1 = on)', 0, 0, 1, 1, 0, 'On: a node slides only across its band and the move fades beyond the band\'s half-width. Off: the move is free in all directions.'),
+    # trail (trace4.trail): the crease followed as the centre of a soft window of dots (2026-10-23)
+    ('talong', 'Trail', 'Window half-length along (mm)', 0.7, 0.05, 5, 0.05, 2, "The window's fade length along the heading: a dot this far ahead or behind the point one step ahead counts 1/e of its strength. Longer = steadier centre, but a long window rounds tight corners."),
+    ('tacross', 'Trail', 'Window half-width across (mm)', 0.35, 0.02, 5, 0.01, 2, "The window's fade length across the heading: a dot this far to the side counts 1/e. About the half-width of the dot band a crease makes; wider reaches a neighbouring crease."),
+    ('tshare', 'Trail', 'Trend share of the heading', 0.5, 0, 1, 0.05, 2, "The new heading blends the dots' axis (the window's principal direction) with the chain's trend: 0 = dots only, 1 = trend only."),
+    ('tfade', 'Trail', 'Fade share that ends a line', 0.25, 0, 1, 0.05, 2, "The line ends when the window's total weight falls below this share of its running level (strength memory as the walk's): the dots have run out. Higher = ends sooner at gaps, less coasting across bare surface."),
     # walk experiments that were tried and backed out; all off at these values
     ('hill', 'Walk experiments', 'Hill rule (1 = on)', 0, 0, 1, 1, 0, 'Band = the hill of the across-profile around the anchor instead of the whole connected set. Backed out 2026-10-17.'),
     ('valley', 'Walk experiments', 'Hill: valley rise', 1.3, 1, 5, 0.05, 2, 'The profile must rise this much above its running minimum to count as a second hill.'),
@@ -170,6 +220,13 @@ TUNE = [
     ('dotlift', 'Display', 'Dot lift (cubes)', 0.5, 0, 5, 0.1, 1, 'Dots are drawn this many cubes out along the facing so dots on convex edges are not buried.'),
     ('snaplift', 'Display', 'Line lift on the surface (mm)', 0.01, 0, 1, 0.005, 3, 'Lines drawn on the surface are lifted this much along the face normal so they are not hidden inside it.'),
     ('picktol', 'Display', 'Pick tolerance (window fraction)', 0.006, 0.0005, 0.05, 0.001, 4, 'A line within this fraction of the window diagonal of the cursor is picked (about 7 px at 1200 px).'),
+    # join stage (bridge.py)
+    ('jmodel', 'Join', 'Trajectory: helix (1) or parabola over the fade (0)', 1, 0, 1, 1, 0, 'The curve read at a piece end and continued into the gap. Helix: constant bend and twist (a straight line, a circle, a curve round a curved body), fitted over the last segment where the nodes still sit on it. Parabola: the first version, fitted over the fade length.'),
+    ('jwobble', 'Join', 'Helix: node wobble (mm)', 0.01, 0.0005, 0.2, 0.001, 4, "The segment grows back from the end while the nodes' rms scatter about the fitted helix stays within this. Measured on the refined pieces: 0.001 mm median over 8 nodes, 0.025 at the 90th percentile; the segment thus stops where the bend truly changes."),
+    ('jminfit', 'Join', 'Helix: nodes to start the fit', 5, 4, 50, 1, 0, 'The segment starts with this many end nodes (a helix has 8 numbers; 5 nodes give 15 equations).'),
+    ('jfade', 'Join', 'Parabola: end fit fade (mm)', 0.5, 0.05, 5, 0.05, 2, 'Parabola model only: the curve at a piece end is fitted over the nodes weighted exp(-(distance back / fade)^2): a node this far back from the end counts 1/e.'),
+    ('jstep', 'Join', 'Bridge node spacing (mm)', 0.087, 0.01, 1, 0.01, 3, 'Spacing of the nodes laid along a bridge.'),
+    ('jang', 'Join', 'A: direction agreement (deg)', 30, 0, 180, 5, 0, 'Two extensions that meet must point at each other within this angle for A to bridge them; else the ends go to B (where a corner may still join them).'),
     ('pickdepth', 'Display', 'Pick depth (mm)', 0.5, 0, 10, 0.1, 1, 'A line this far behind the surface under the cursor is hidden by it and not picked.'),
 ]
 TUNE_DEFAULTS = {t[0]: t[3] for t in TUNE}
@@ -198,9 +255,11 @@ class TuneDialog(QtWidgets.QDialog):
 class App(QtWidgets.QMainWindow):
     def __init__(self):
         super().__init__(); self.setWindowTitle('Segmentation tool'); self.resize(1500, 950)
-        self.P = self.F = None; self.path = None; self.res = None; self.curves = None; self.refined = None; self.mesh_t = None
+        self.P = self.F = None; self.path = None; self.res = None; self.curves = None; self.refined = None; self.joined = None; self.mesh_t = None; self.walk_shared = None
         self.drawn = {}; self.act_mesh = None; self.hover = None; self.sel = None; self._press = None   # picking: drawn line actors, hovered and selected (kind, k)
         self.tune = dict(TUNE_DEFAULTS); self.tune_dlg = None   # every inner constant of the pipeline (TUNE), edited in the Tuning window
+        try: self.file_log, log_path = open_session_log()
+        except Exception: self.file_log, log_path = None, None
         root = QtWidgets.QWidget(); self.setCentralWidget(root); lay = QtWidgets.QHBoxLayout(root)
         self.plotter = QtInteractor(root); lay.addWidget(self.plotter.interactor, 1)
         self.plotter.iren.add_observer('MouseMoveEvent', self._on_move); self.plotter.iren.add_observer('LeftButtonPressEvent', self._on_press); self.plotter.iren.add_observer('LeftButtonReleaseEvent', self._on_release)
@@ -226,6 +285,8 @@ class App(QtWidgets.QMainWindow):
         g2 = QtWidgets.QGroupBox('2. Build lines'); f2 = QtWidgets.QFormLayout(g2)
         self.cb_method = QtWidgets.QComboBox(); self.cb_method.addItems(['Anchored walk', 'Thick strokes (old)']); row(f2, 'Method', self.cb_method, TIPS['method'])
         self.w_walk = QtWidgets.QWidget(); fw = QtWidgets.QFormLayout(self.w_walk); fw.setContentsMargins(0, 0, 0, 0); f2.addRow(self.w_walk)
+        self.chk_trail = QtWidgets.QCheckBox('Trail: follow the centre of a soft dot window (new)'); self.chk_trail.setChecked(False); self.chk_trail.setToolTip(TIPS['trail']); fw.addRow(self.chk_trail)
+        self.chk_curve = QtWidgets.QCheckBox('Trend as a curve (arc), not a chord'); self.chk_curve.setChecked(True); self.chk_curve.setToolTip(TIPS['curve']); fw.addRow(self.chk_curve)
         self.sp_step = spin(0.087, 0.01, 2, 0.01, 3); row(fw, 'Step (mm)', self.sp_step, TIPS['step'])
         self.sp_slice = spin(0.7, 0.05, 5, 0.05, 2); row(fw, 'Slice half-length (mm)', self.sp_slice, TIPS['slice'])
         self.sp_reach = spin(0.22, 0.02, 3, 0.02, 2); row(fw, 'Reach (mm)', self.sp_reach, TIPS['reach'])
@@ -245,6 +306,11 @@ class App(QtWidgets.QMainWindow):
         self.cb_method.currentIndexChanged.connect(self._method_changed); self._method_changed()
         side.addWidget(g2)
 
+        g2b = QtWidgets.QGroupBox('2b. Merge redundant lines'); f2b = QtWidgets.QFormLayout(g2b)
+        self.sp_margin = spin(0.07, 0.005, 1, 0.005, 3); row(f2b, 'Margin (mm)', self.sp_margin, TIPS['margin'])
+        self.btn_merge = QtWidgets.QPushButton('Merge lines (replaces the walk lines)'); self.btn_merge.clicked.connect(self.merge_lines); self.btn_merge.setEnabled(False); self.btn_merge.setToolTip(TIPS['merge']); f2b.addRow(self.btn_merge)
+        side.addWidget(g2b)
+
         g3 = QtWidgets.QGroupBox('3. Refine lines'); f3 = QtWidgets.QFormLayout(g3)
         self.lbl_pick = QtWidgets.QLabel('no line selected (hover a line, click to select)'); self.lbl_pick.setWordWrap(True); self.lbl_pick.setToolTip(TIPS['pick']); f3.addRow(self.lbl_pick)
         self.sp_finer = spin(3, 1, 20, 1); row(f3, 'Finer than the coarse cube (times)', self.sp_finer, TIPS['finer'])
@@ -255,29 +321,46 @@ class App(QtWidgets.QMainWindow):
         self.btn_refine = QtWidgets.QPushButton('Refine all lines (a few seconds per line)'); self.btn_refine.clicked.connect(lambda: self.refine_lines(False)); self.btn_refine.setEnabled(False); f3.addRow(self.btn_refine)
         side.addWidget(g3)
 
+        g3b = QtWidgets.QGroupBox('3b. Merge duplicate pieces'); f3b = QtWidgets.QFormLayout(g3b)
+        self.sp_rmargin = spin(0.05, 0.005, 1, 0.005, 3); row(f3b, 'Margin (mm)', self.sp_rmargin, TIPS['rmargin'])
+        self.btn_rmerge = QtWidgets.QPushButton('Merge pieces (replaces the refined pieces)'); self.btn_rmerge.clicked.connect(self.merge_pieces); self.btn_rmerge.setEnabled(False); self.btn_rmerge.setToolTip(TIPS['rmerge']); f3b.addRow(self.btn_rmerge)
+        side.addWidget(g3b)
+
+        g4 = QtWidgets.QGroupBox('4. Join lines'); f4 = QtWidgets.QFormLayout(g4)
+        self.sp_tola = spin(0.1, 0.01, 2, 0.01, 3); row(f4, 'A: meeting tolerance (mm)', self.sp_tola, TIPS['tol_a'])
+        self.sp_maxa = spin(3.0, 0.1, 50, 0.1, 2); row(f4, 'A: longest gap (mm)', self.sp_maxa, TIPS['max_a'])
+        self.sp_tolb = spin(0.1, 0.01, 2, 0.01, 3); row(f4, 'B: reach tolerance (mm)', self.sp_tolb, TIPS['tol_b'])
+        self.sp_maxb = spin(1.5, 0.1, 50, 0.1, 2); row(f4, 'B: longest reach (mm)', self.sp_maxb, TIPS['max_b'])
+        self.btn_join = QtWidgets.QPushButton('Join lines (bridge pieces, seek joints)'); self.btn_join.clicked.connect(self.join_lines); self.btn_join.setEnabled(False); self.btn_join.setToolTip(TIPS['join']); f4.addRow(self.btn_join)
+        side.addWidget(g4)
+
         self.btn_tune = QtWidgets.QPushButton('Tuning: all constants…'); self.btn_tune.clicked.connect(self.open_tune); self.btn_tune.setToolTip('Every constant of the pipeline not on this panel, as a handle. The main panel keeps the handles found to be sensible.'); side.addWidget(self.btn_tune)
         self.chk_flatshade = QtWidgets.QCheckBox('Flat shading (creases visible)'); self.chk_flatshade.setChecked(False); self.chk_flatshade.setToolTip('Each triangle lit by its own facing, as the print has it. Off: smooth shading, which blends every fold over the neighbouring triangles and hides faint creases.'); self.chk_flatshade.stateChanged.connect(self.redraw); side.addWidget(self.chk_flatshade)
         self.chk_dots = QtWidgets.QCheckBox('Show dots'); self.chk_dots.setChecked(True); self.chk_dots.stateChanged.connect(self.redraw); side.addWidget(self.chk_dots)
         self.chk_curves = QtWidgets.QCheckBox('Show walk lines (blue)'); self.chk_curves.setChecked(True); self.chk_curves.stateChanged.connect(self.redraw); side.addWidget(self.chk_curves)
         self.chk_refined = QtWidgets.QCheckBox('Show refined lines (red)'); self.chk_refined.setChecked(True); self.chk_refined.stateChanged.connect(self.redraw); side.addWidget(self.chk_refined)
+        self.chk_joined = QtWidgets.QCheckBox('Show joined lines (dark red, bridges magenta, loose ends black, shared green)'); self.chk_joined.setChecked(True); self.chk_joined.stateChanged.connect(self.redraw); side.addWidget(self.chk_joined)
         self.chk_snap = QtWidgets.QCheckBox('Draw lines on the surface (a few seconds)'); self.chk_snap.setChecked(True); self.chk_snap.setToolTip(TIPS['snap']); self.chk_snap.stateChanged.connect(self.redraw); side.addWidget(self.chk_snap)
         self.btn_save = QtWidgets.QPushButton('Save lines…'); self.btn_save.clicked.connect(self.save); self.btn_save.setEnabled(False); side.addWidget(self.btn_save)
         self.btn_dump = QtWidgets.QPushButton('Dump for debugging'); self.btn_dump.clicked.connect(self.dump); self.btn_dump.setToolTip('Writes dots, lines, log, settings and a screenshot of the viewport to out/debug/<time>/'); side.addWidget(self.btn_dump)
         self.txt = QtWidgets.QPlainTextEdit(); self.txt.setReadOnly(True); self.txt.setMaximumWidth(380); side.addWidget(self.txt, 1)
         self.plotter.set_background('white'); self.plotter.add_axes()
+        self.logmsg(f'session log: {log_path}' if log_path else 'session log could not be opened (out/log)')
 
-    def logmsg(self, s): self.txt.appendPlainText(s)
+    def logmsg(self, s):
+        self.txt.appendPlainText(s)
+        if self.file_log: self.file_log(s)
     def _method_changed(self, *_):
         walk = self.cb_method.currentIndex() == 0; self.w_walk.setVisible(walk); self.w_old.setVisible(not walk)
     def busy(self, b):
-        self.btn_dots.setEnabled(not b and self.P is not None); self.btn_load_dots.setEnabled(not b and self.P is not None); self.btn_lines.setEnabled(not b and self.res is not None); self.btn_refine1.setEnabled(not b and bool(self.curves)); self.btn_refine.setEnabled(not b and bool(self.curves))
+        self.btn_dots.setEnabled(not b and self.P is not None); self.btn_load_dots.setEnabled(not b and self.P is not None); self.btn_lines.setEnabled(not b and self.res is not None); self.btn_refine1.setEnabled(not b and bool(self.curves)); self.btn_refine.setEnabled(not b and bool(self.curves)); self.btn_join.setEnabled(not b and bool(self.curves)); self.btn_merge.setEnabled(not b and bool(self.curves)); self.btn_rmerge.setEnabled(not b and self.refined is not None and bool(self.refined['lines']))
 
     def load(self):
         path, _ = QtWidgets.QFileDialog.getOpenFileName(self, 'Open STL', '', 'Meshes (*.stl *.obj *.ply *.3mf)')
         if not path: return
         try: self.P, self.F = load_mesh(path)
         except Exception as ex: QtWidgets.QMessageBox.critical(self, 'Load failed', str(ex)); return
-        self.path = path; self.lbl_file.setText(os.path.basename(path)); self.res = self.curves = self.refined = None; self.mesh_t = None; self.btn_save.setEnabled(False)
+        self.path = path; self.lbl_file.setText(os.path.basename(path)); self.res = self.curves = self.refined = self.joined = None; self.mesh_t = None; self.btn_save.setEnabled(False)
         h = float((self.P.max(0)-self.P.min(0)).max())
         e = np.linalg.norm(self.P[self.F[:, 1]]-self.P[self.F[:, 0]], axis=1)
         self.logmsg(f'loaded {os.path.basename(path)}: {len(self.F)} faces, height {h:.1f} mm, typical triangle edge {np.median(e):.3f} mm')
@@ -288,7 +371,7 @@ class App(QtWidgets.QMainWindow):
     def _use_dots(self, p):
         try: res, cube, flat, model, blend = load_dots(p)
         except Exception as ex: self.logmsg(f'could not load dots from {p}: {ex}'); return
-        self.res = res; self.curves = self.refined = None; self.btn_save.setEnabled(False); self.sp_cube.setValue(cube); self.sp_cut.setValue(res['cut']); self.chk_flat.setChecked(flat); self.chk_blend.setChecked(blend)
+        self.res = res; self.curves = self.refined = self.joined = None; self.btn_save.setEnabled(False); self.sp_cube.setValue(cube); self.sp_cut.setValue(res['cut']); self.chk_flat.setChecked(flat); self.chk_blend.setChecked(blend)
         self.logmsg(f'loaded {len(res["idx"])} dots from {os.path.basename(p)} (cube {cube:g} mm, cut {res["cut"]:g}, {"flat" if flat else "blended"}, {"triangles blended in the cube" if blend else "nearest triangle"})')
 
     def load_dots(self):
@@ -307,7 +390,7 @@ class App(QtWidgets.QMainWindow):
         self.logmsg(f'--- find dots: cube={size} mm ({cells} cells over {h:.1f} mm), cut={cut}, flat={flat}, blend={blend}'); t0 = time.time()
         self._start(lambda log: creases.find_dots(self.P, self.F, cells, cut, 0.0, flat, log, height=h, blend=blend), lambda r: self._dots_done(r, t0))
     def _dots_done(self, r, t0):
-        self.res = r; self.curves = self.refined = None; self.logmsg(f'dots done in {time.time()-t0:.1f} s')
+        self.res = r; self.curves = self.refined = self.joined = None; self.logmsg(f'dots done in {time.time()-t0:.1f} s')
         try: self.logmsg(f'saved dots to {save_dots(r, self.path, self.sp_cube.value(), self.sp_cut.value(), self.chk_flat.isChecked(), self.chk_blend.isChecked())}')
         except Exception: self.logmsg(traceback.format_exc())
         self.busy(False); self.redraw()
@@ -315,8 +398,8 @@ class App(QtWidgets.QMainWindow):
     def stroke_params(self):
         return dict(W=self.sp_W.value(), L=self.sp_L.value(), K=self.sp_K.value(), align=self.sp_align.value(), agree=self.sp_agree.value(), minlen=int(self.sp_minlen.value()))
     def walk_tune(self):
-        """the walk's hidden constants (TUNE groups Walk and Walk experiments) as trace4.walk keywords"""
-        return {k: self.tune[k] for k, g, *_ in TUNE if g in ('Walk', 'Walk experiments')}
+        """the walk's hidden constants (TUNE groups Walk, Trail and Walk experiments) plus the two method toggles, as trace4.walk/trail keywords"""
+        return {**{k: self.tune[k] for k, g, *_ in TUNE if g in ('Walk', 'Trail', 'Walk experiments')}, 'trail': int(self.chk_trail.isChecked()), 'curve': int(self.chk_curve.isChecked())}
     def walk_params(self):
         return dict(**self.walk_tune(), step=self.sp_step.value(), slice=self.sp_slice.value(), reach=self.sp_reach.value(), pull=self.sp_pull.value(), look=self.sp_look.value(), levp=self.sp_levp.value(), minlen=int(self.sp_wminlen.value()))
     def refine_params(self):
@@ -324,8 +407,10 @@ class App(QtWidgets.QMainWindow):
         t = self.tune; walk = {**self.walk_tune(), 'step': t['fstep'], 'slice': t['fslice'], 'reach': t['freach'], 'pull': t['fpull'], 'look': t['flook'], 'levp': t['flevp'], 'minlen': int(t['fminlen']), 'unit': t['funit']}   # the fine walk's own unit replaces the walk group's
         tune = dict(nbh=t['nbh'], rungstep=t['rungstep'], rungw=t['rungw'], cresth=t['cresth'], tuberes=t['tuberes'], avoidk=t['avoidk'], avoidres=t['avoidres'], slack=t['eslack'])
         return dict(finer=int(self.sp_finer.value()), radius=self.sp_radius.value(), area=self.sp_area.value(), cut=self.sp_rcut.value(), unit=t['funit'], walk=walk, tune=tune)
+    def join_params(self):
+        t = self.tune; return dict(model='helix' if t['jmodel'] > 0 else 'para', wobble=t['jwobble'], minfit=int(t['jminfit']), fade=t['jfade'], step=t['jstep'], ang_a=t['jang'], tol_a=self.sp_tola.value(), max_a=self.sp_maxa.value(), tol_b=self.sp_tolb.value(), max_b=self.sp_maxb.value())
     def all_params(self):
-        return dict(method=self.cb_method.currentText(), **({} if self.cb_method.currentIndex() else self.walk_params()), **({'join_mm': self.sp_G.value(), **self.stroke_params()} if self.cb_method.currentIndex() else {}), tune=dict(self.tune))
+        return dict(method=self.cb_method.currentText(), merge_margin=self.sp_margin.value() if self.walk_shared is not None else None, **({} if self.cb_method.currentIndex() else self.walk_params()), **({'join_mm': self.sp_G.value(), **self.stroke_params()} if self.cb_method.currentIndex() else {}), tune=dict(self.tune))
     def open_tune(self):
         if self.tune_dlg is None: self.tune_dlg = TuneDialog(self)
         self.tune_dlg.show(); self.tune_dlg.raise_()
@@ -333,13 +418,33 @@ class App(QtWidgets.QMainWindow):
     def build_lines(self):
         t0 = time.time()
         if self.cb_method.currentIndex() == 0:
-            wp = self.walk_params(); self.logmsg('--- build lines (anchored walk): ' + ', '.join(f'{k}={v}' for k, v in wp.items()))
+            wp = self.walk_params(); self.logmsg(f"--- build lines ({'trail' if wp['trail'] else 'anchored walk'}, {'arc' if wp['curve'] else 'chord'} trend): " + ', '.join(f'{k}={v}' for k, v in wp.items()))
             self._start(lambda log: trace4.run(self.res, log=log, **wp), lambda r: self._lines_done(r, t0)); return
         sp = self.stroke_params(); self.logmsg('--- build lines (thick strokes): ' + ', '.join(f'{k}={v}' for k, v in sp.items()))
         G = self.sp_G.value()
         self._start(lambda log: (lambda cv: creases.join(cv, G, log=log) if G > 0 else cv)(creases.strokes(self.res, log=log, **sp)), lambda r: self._lines_done(r, t0))
+    def merge_lines(self):
+        """stage 2b: merge.run on the walk lines; the merged set replaces self.curves"""
+        if not self.curves: return
+        margin = self.sp_margin.value(); curves = self.curves; self.logmsg(f'--- merge lines: margin={margin}'); t0 = time.time()
+        self._start(lambda log: merge.run(curves, margin, log=log), lambda r: self._merge_done(r, t0))
+    def _merge_done(self, r, t0):
+        rep = r['report']; self.curves = r['lines']; self.walk_shared = np.array([s[2] for s in r['shared']]+[s[3] for s in r['shared']]).reshape(-1, 3); self.refined = self.joined = None; self.sel = None
+        self.logmsg(f'merged in {time.time()-t0:.1f} s: {rep["lines_before"]} -> {rep["lines_after"]} lines, {rep["nodes_before"]} -> {rep["nodes_after"]} nodes; {rep["merges"]} merges ({rep["long_stretches"]} stretches of 3+ nodes, {rep["touches"]} touches), {rep["passes"]} passes')
+        self.busy(False); self.redraw()
+
+    def merge_pieces(self):
+        """stage 3b: merge.run on the refined pieces, walk indices carried as labels; the merged set replaces self.refined's lines"""
+        if self.refined is None or not self.refined['lines']: return
+        margin = self.sp_rmargin.value(); pieces, index = self.refined['lines'], self.refined['index']; self.logmsg(f'--- merge pieces: margin={margin}'); t0 = time.time()
+        self._start(lambda log: merge.run(pieces, margin, log=log, labels=index), lambda r: self._pieces_merged(r, t0))
+    def _pieces_merged(self, r, t0):
+        rep = r['report']; self.refined = dict(self.refined, lines=r['lines'], index=list(r['labels'])); self.joined = None; self.sel = None
+        self.logmsg(f'pieces merged in {time.time()-t0:.1f} s: {rep["lines_before"]} -> {rep["lines_after"]} pieces, {rep["nodes_before"]} -> {rep["nodes_after"]} nodes; {rep["merges"]} merges ({rep["long_stretches"]} stretches of 3+ nodes, {rep["touches"]} touches), {rep["passes"]} passes')
+        self.busy(False); self.redraw()
+
     def _lines_done(self, r, t0):
-        self.curves = r; self.refined = None; self.logmsg(f'lines done in {time.time()-t0:.1f} s'); self.busy(False); self.btn_save.setEnabled(True); self.redraw()
+        self.curves = r; self.walk_shared = None; self.refined = self.joined = None; self.logmsg(f'lines done in {time.time()-t0:.1f} s'); self.busy(False); self.btn_save.setEnabled(True); self.redraw()
 
     def refine_lines(self, one):
         """stage 3: refine.refine_all on one line (nearest the point) or all; result kept in self.refined (dict of lists)"""
@@ -357,7 +462,21 @@ class App(QtWidgets.QMainWindow):
             old = [(i, c) for i, c in zip(self.refined['index'], self.refined['lines']) if i not in r['index']]
             self.refined = dict(index=[i for i, _ in old]+r['index'], lines=[c for _, c in old]+r['lines'], tubes=self.refined['tubes']+r['tubes'])
         else: self.refined = r
-        self.logmsg(f'refined in {time.time()-t0:.1f} s; {len(self.refined["index"])} refined lines held'); self.busy(False); self.redraw()
+        self.joined = None; self.logmsg(f'refined in {time.time()-t0:.1f} s; {len(self.refined["index"])} refined lines held'); self.busy(False); self.redraw()
+
+    def join_lines(self):
+        """stage 4: bridge.run on the refined pieces (and the walk lines without one); result kept in self.joined"""
+        if not self.curves: return
+        jp = self.join_params(); pieces, index = ([], []) if self.refined is None else (self.refined['lines'], self.refined['index'])
+        self.logmsg(f'--- join lines: {len(pieces)} refined pieces, {len(self.curves)} walk lines; ' + ', '.join(f'{k}={v}' for k, v in jp.items())); t0 = time.time(); curves = self.curves; slack = self.tune['eslack']*self.sp_cube.value()
+        def job(log):
+            r = bridge.run(pieces, index, curves, log=log, **jp); r['agreement'] = bridge.walk_agreement(r, curves, slack); return r
+        self._start(job, lambda r: self._join_done(r, t0))
+    def _join_done(self, r, t0):
+        self.joined = r; rep = r['report']; ag = r['agreement']
+        self.logmsg(f'joined in {time.time()-t0:.1f} s: {rep["lines"]} lines; A bridged {rep["a_bridged"]}, touching {rep["a_touch"]}, refused {rep["a_refused"]}; B tees {rep["tees"]}, corners {rep["corners"]}, loose ends {rep["loose"]}; {rep["bridge_nodes"]} bridge nodes; '
+                    f'B joints against the walk end record: agree {ag["agree"]}, disagree {ag["disagree"]}, walk had none {ag["new"]}')
+        self.busy(False); self.redraw()
 
     def _draw_lines(self, curves, color, width, kind=None, index=None):
         """draws the curves as one actor, one polyline cell per curve. kind: registers the actor for picking, with index[cell] the
@@ -370,6 +489,24 @@ class App(QtWidgets.QMainWindow):
         cells = np.concatenate([np.r_[k, np.arange(o, o+k)] for k, o in zip(n, off)])
         a = self.plotter.add_mesh(pv.PolyData(pts, lines=cells), color=color, line_width=width)
         if kind: self.drawn[kind] = (a, pts, n, off, list(range(len(curves))) if index is None else index)
+
+    def _draw_joined(self):
+        """the joined lines: runs of measured nodes dark red, bridge runs magenta (with the measured node at each side so they connect), loose ends black, shared nodes green"""
+        J = self.joined; meas, bridges = [], []
+        for L, m in zip(J['lines'], J['measured']):
+            cut = np.flatnonzero(np.diff(m.astype(int)) != 0)+1
+            for rn in np.split(np.arange(len(L)), cut):
+                if m[rn[0]]: meas.append(L[rn])
+                else: bridges.append(L[max(rn[0]-1, 0):min(rn[-1]+2, len(L))])
+        meas = [c for c in meas if len(c) > 1]; bridges = [c for c in bridges if len(c) > 1]
+        if meas: self._draw_lines(meas, 'darkred', 4)
+        if bridges: self._draw_lines(bridges, 'magenta', 5)
+        for pts, color in ((np.array([p for *_, p in J['loose']]).reshape(-1, 3), 'black'), (np.array([p for *_, p in J['shared']]).reshape(-1, 3), 'lime')):
+            if len(pts):
+                if self.chk_snap.isChecked():
+                    if self.mesh_t is None: self.mesh_t = trimesh.Trimesh(self.P, self.F, process=False)
+                    Cq, _, tq = trimesh.proximity.closest_point(self.mesh_t, pts); pts = Cq+self.tune['snaplift']*self.mesh_t.face_normals[tq]
+                self.plotter.add_mesh(pv.PolyData(pts), color=color, point_size=9, render_points_as_spheres=True)
 
     def _line_pts(self, key):
         """the drawn (snapped) points of line key=(kind, k)"""
@@ -412,10 +549,18 @@ class App(QtWidgets.QMainWindow):
             hi = float(np.percentile(d['fold (deg)'], 99))
             self.plotter.add_mesh(d, scalars='fold (deg)', cmap='plasma', clim=(float(self.res['cut']), hi), point_size=5, render_points_as_spheres=True,
                                   scalar_bar_args=dict(title='dot strength (deg)', vertical=True, position_x=0.88, position_y=0.3, height=0.4, width=0.06))
-        if self.curves and self.chk_curves.isChecked(): self._draw_lines(self.curves, 'blue', 3, 'walk')
+        if self.curves and self.chk_curves.isChecked():
+            self._draw_lines(self.curves, 'blue', 3, 'walk')
+            if self.walk_shared is not None and len(self.walk_shared):
+                pts = self.walk_shared
+                if self.chk_snap.isChecked():
+                    if self.mesh_t is None: self.mesh_t = trimesh.Trimesh(self.P, self.F, process=False)
+                    Cq, _, tq = trimesh.proximity.closest_point(self.mesh_t, pts); pts = Cq+self.tune['snaplift']*self.mesh_t.face_normals[tq]
+                self.plotter.add_mesh(pv.PolyData(pts), color='lime', point_size=8, render_points_as_spheres=True)
         if self.refined is not None and self.refined['lines'] and self.chk_refined.isChecked():
             keep = [k for k, c in enumerate(self.refined['lines']) if len(c) > 1]
             if keep: self._draw_lines([self.refined['lines'][k] for k in keep], 'red', 4, 'refined', keep)   # refined lines over the walk's lines
+        if self.joined is not None and self.chk_joined.isChecked(): self._draw_joined()
         if self.sel is not None and (self.sel[0] not in self.drawn or self.sel[1] not in self.drawn[self.sel[0]][4]): self.sel = None   # the selected line is gone
         if cam is not None and had: self.plotter.camera_position = cam
         else: self.plotter.reset_camera()
@@ -426,10 +571,13 @@ class App(QtWidgets.QMainWindow):
         out = os.path.splitext(self.path)[0]+'_lines.npz'
         prm = dict(cube_mm=self.sp_cube.value(), cut=self.sp_cut.value(), flat=self.chk_flat.isChecked(), blend=self.chk_blend.isChecked(), **self.all_params())
         cv = list(self.curves)
+        if self.joined is not None:                                                   # the joined lines are the whole set (pieces bridged, walk lines without a piece as they are)
+            cv = [c for c in self.joined['lines'] if len(c) > 1]; prm['joined'] = len(cv); prm.update({'join_'+k: v for k, v in self.join_params().items()})
+            np.savez(out, n=np.array([len(c) for c in cv]), pts=np.vstack(cv), measured=np.concatenate([m for c, m in zip(self.joined['lines'], self.joined['measured']) if len(c) > 1]), params=str(prm)); self.logmsg(f'saved {out} ({len(cv)} joined lines)'); return
         if self.refined is not None:                                                  # refined lines replace their walk lines (a line refined into
             done = sorted(set(self.refined['index']))                                 # several pieces gives several lines; one into none is dropped)
             cv = [c for i, c in enumerate(cv) if i not in done]+[c for c in self.refined['lines'] if len(c) > 1]
-            prm['refined'] = len(done); prm.update({'refine_'+k: v for k, v in self.refine_params().items() if k not in ('walk', 'tune')})
+            prm['refined'] = len(done); prm.update({'refine_'+k: v for k, v in self.refine_params().items() if k not in ('walk', 'tune')}); prm['pieces_merge_margin'] = self.sp_rmargin.value()
         np.savez(out, n=np.array([len(c) for c in cv]), pts=np.vstack(cv), params=str(prm)); self.logmsg(f'saved {out} ({prm.get("refined", 0)} refined lines)')
 
     def dump(self):
@@ -451,6 +599,9 @@ class App(QtWidgets.QMainWindow):
                 np.savez(os.path.join(d, 'refined.npz'), n=np.array([len(c) for c in r_['lines']]), pts=np.vstack(r_['lines']), index=np.array(r_['index']),
                          dots=np.vstack([t['dots'] for t in T]), turn=np.concatenate([t['turn'] for t in T]), size=T[0]['size'])
                 prm['refined'] = len(set(r_['index'])); prm.update({'refine_'+k: v for k, v in self.refine_params().items() if k not in ('walk', 'tune')})
+            if self.joined is not None:
+                J = self.joined; np.savez(os.path.join(d, 'joined.npz'), n=np.array([len(c) for c in J['lines']]), pts=np.vstack(J['lines']), measured=np.concatenate(J['measured']), walk=np.array(J['walk']),
+                                          shared=np.array([p for *_, p in J['shared']]).reshape(-1, 3), loose=np.array([p for *_, p in J['loose']]).reshape(-1, 3)); prm['joined'] = len(J['lines']); prm.update({'join_'+k: v for k, v in self.join_params().items()})
             with open(os.path.join(d, 'log.txt'), 'w', encoding='utf-8') as f: f.write(self.txt.toPlainText())
             import json
             with open(os.path.join(d, 'settings.json'), 'w', encoding='utf-8') as f: json.dump(prm, f, indent=1)
