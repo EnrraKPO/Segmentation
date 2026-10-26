@@ -29,6 +29,7 @@ import pyvista as pv
 from pyvistaqt import QtInteractor
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import creases, trace4, refine, bridge, merge
+from linesio import _split, _npz, read_lines, load_mesh
 
 
 def pick_line(plotter, act_mesh, drawn, x, y, tol=0.006, depth_mm=0.5):
@@ -98,12 +99,6 @@ def last_dots(model):
     if not os.path.exists(lj): return None
     name = json.load(open(lj)).get(os.path.basename(model)); p = name and os.path.join(DOTS_DIR, name)
     return p if p and os.path.exists(p) else None
-
-
-def load_mesh(path):
-    m = trimesh.load(path, process=True)
-    if isinstance(m, trimesh.Scene): m = trimesh.util.concatenate([g for g in m.geometry.values()])
-    return np.asarray(m.vertices, np.float64), np.asarray(m.faces, np.int64)
 
 
 class Worker(QtCore.QThread):
@@ -198,6 +193,7 @@ TUNE = [
     ('sparse', 'Walk experiments', 'Sparse cut (x median spacing)', 0.0, 0, 10, 0.1, 1, 'Drop slice dots whose nearest neighbour is further than this times the median spacing. 0 = off.'),
     ('lookn', 'Walk experiments', 'Look-ahead: older trend (nodes)', 0, 0, 100, 1, 0, 'Probe the trend of the nodes before the last few. 0 = off.'),
     ('astr', 'Walk experiments', 'Anchor strength exponent', 0.0, 0, 5, 0.1, 1, 'Exponent on relative strength in the anchor score. 0 = alignment only.'),
+    ('axisp', 'Walk', 'Axis: power of strength', 2.0, 0, 6, 0.5, 1, "The axis at a dot is the direction along which the strength in the sphere spreads; each dot counts with its strength to this power (2 = its bend squared, the say refine gives a dot). 0 = positions alone, the reading before 2026-10-24, which has no direction once dots lie everywhere."),
     # refine stage (refine.py)
     ('nbh', 'Refine', 'Bend neighbourhood (x area)', 2.0, 0.5, 10, 0.1, 1, 'The bend at a fine cube is fitted to all cubes within this many times the area; weights exp(-(d/area)^2).'),
     ('rungstep', 'Refine', 'Rung spacing (coarse cubes)', 0.5, 0.05, 5, 0.05, 2, 'The bend is read only on rungs across the line, one every this many coarse cubes. One per step broke the walk; half is the spacing found.'),
@@ -342,6 +338,8 @@ class App(QtWidgets.QMainWindow):
         self.chk_joined = QtWidgets.QCheckBox('Show joined lines (dark red, bridges magenta, loose ends black, shared green)'); self.chk_joined.setChecked(True); self.chk_joined.stateChanged.connect(self.redraw); side.addWidget(self.chk_joined)
         self.chk_snap = QtWidgets.QCheckBox('Draw lines on the surface (a few seconds)'); self.chk_snap.setChecked(True); self.chk_snap.setToolTip(TIPS['snap']); self.chk_snap.stateChanged.connect(self.redraw); side.addWidget(self.chk_snap)
         self.btn_save = QtWidgets.QPushButton('Save lines…'); self.btn_save.clicked.connect(self.save); self.btn_save.setEnabled(False); side.addWidget(self.btn_save)
+        self.btn_load_lines = QtWidgets.QPushButton('Load lines…'); self.btn_load_lines.clicked.connect(self.load_lines); self.btn_load_lines.setEnabled(False); side.addWidget(self.btn_load_lines)
+        self.btn_load_lines.setToolTip('Puts back the lines of an earlier session: a Save lines file (walk lines, refined pieces and joined set as they stood) or any .npz of a debugging dump folder. The stages after the loaded ones run on them as usual.')
         self.btn_dump = QtWidgets.QPushButton('Dump for debugging'); self.btn_dump.clicked.connect(self.dump); self.btn_dump.setToolTip('Writes dots, lines, log, settings and a screenshot of the viewport to out/debug/<time>/'); side.addWidget(self.btn_dump)
         self.txt = QtWidgets.QPlainTextEdit(); self.txt.setReadOnly(True); self.txt.setMaximumWidth(380); side.addWidget(self.txt, 1)
         self.plotter.set_background('white'); self.plotter.add_axes()
@@ -353,7 +351,7 @@ class App(QtWidgets.QMainWindow):
     def _method_changed(self, *_):
         walk = self.cb_method.currentIndex() == 0; self.w_walk.setVisible(walk); self.w_old.setVisible(not walk)
     def busy(self, b):
-        self.btn_dots.setEnabled(not b and self.P is not None); self.btn_load_dots.setEnabled(not b and self.P is not None); self.btn_lines.setEnabled(not b and self.res is not None); self.btn_refine1.setEnabled(not b and bool(self.curves)); self.btn_refine.setEnabled(not b and bool(self.curves)); self.btn_join.setEnabled(not b and bool(self.curves)); self.btn_merge.setEnabled(not b and bool(self.curves)); self.btn_rmerge.setEnabled(not b and self.refined is not None and bool(self.refined['lines']))
+        self.btn_dots.setEnabled(not b and self.P is not None); self.btn_load_dots.setEnabled(not b and self.P is not None); self.btn_load_lines.setEnabled(not b and self.P is not None); self.btn_lines.setEnabled(not b and self.res is not None); self.btn_refine1.setEnabled(not b and bool(self.curves)); self.btn_refine.setEnabled(not b and bool(self.curves)); self.btn_join.setEnabled(not b and bool(self.curves)); self.btn_merge.setEnabled(not b and bool(self.curves)); self.btn_rmerge.setEnabled(not b and self.refined is not None and bool(self.refined['lines']))
 
     def load(self):
         path, _ = QtWidgets.QFileDialog.getOpenFileName(self, 'Open STL', '', 'Meshes (*.stl *.obj *.ply *.3mf)')
@@ -379,6 +377,15 @@ class App(QtWidgets.QMainWindow):
         p, _ = QtWidgets.QFileDialog.getOpenFileName(self, 'Load saved dots', DOTS_DIR, 'Dot sets (*.npz)')
         if not p: return
         self._use_dots(p); self.busy(False); self.redraw()
+
+    def load_lines(self):
+        p, _ = QtWidgets.QFileDialog.getOpenFileName(self, 'Load saved lines', os.path.join(os.path.dirname(os.path.abspath(__file__)), 'out'), 'Saved lines (*.npz)')
+        if not p: return
+        try: st = read_lines(p)
+        except Exception as ex: self.logmsg(f'could not load lines from {p}: {ex}'); return
+        self.curves = st['walk']; self.walk_shared = st['walk_shared']; self.refined = st['refined']; self.joined = st['joined']; self.sel = None
+        self.logmsg(f'loaded from {p} ({st["note"]}): {len(self.curves)} walk lines' + ('' if self.refined is None else f', {len(self.refined["lines"])} refined pieces of {len(set(self.refined["index"]))} lines') + ('' if self.joined is None else f', {len(self.joined["lines"])} joined lines'))
+        self.busy(False); self.btn_save.setEnabled(bool(self.curves)); self.redraw()
 
     def _start(self, fn, on_done):
         self.busy(True); self.worker = Worker(fn); self.worker.log.connect(self.logmsg); self.worker.done.connect(on_done); self.worker.failed.connect(self.failed); self.worker.start()
@@ -566,6 +573,16 @@ class App(QtWidgets.QMainWindow):
         else: self.plotter.reset_camera()
         self._mark('sel', self.sel, 'lime', 7); self.lbl_pick.setText(self._describe(self.sel))
 
+    def _stage_arrays(self):
+        """the stages as they stand, stored in the Save lines file so Load lines… can put them back"""
+        a = dict(walk_n=np.array([len(c) for c in self.curves]), walk_pts=np.vstack(self.curves), walk_shared=np.zeros((0, 3)) if self.walk_shared is None else np.asarray(self.walk_shared).reshape(-1, 3))
+        if self.refined is not None and self.refined['lines']:
+            r_ = self.refined; a.update(ref_n=np.array([len(c) for c in r_['lines']]), ref_pts=np.vstack([np.asarray(c, float).reshape(-1, 3) for c in r_['lines']]), ref_index=np.array(r_['index']))
+        if self.joined is not None:
+            J = self.joined; a.update(joined_n=np.array([len(c) for c in J['lines']]), joined_pts=np.vstack([np.asarray(c, float).reshape(-1, 3) for c in J['lines']]), joined_measured=np.concatenate(J['measured']), joined_walk=np.array(J['walk']),
+                                      joined_shared=np.array([q for *_, q in J['shared']]).reshape(-1, 3), joined_loose=np.array([q for *_, q in J['loose']]).reshape(-1, 3))
+        return a
+
     def save(self):
         if not self.curves: return
         out = os.path.splitext(self.path)[0]+'_lines.npz'
@@ -573,12 +590,12 @@ class App(QtWidgets.QMainWindow):
         cv = list(self.curves)
         if self.joined is not None:                                                   # the joined lines are the whole set (pieces bridged, walk lines without a piece as they are)
             cv = [c for c in self.joined['lines'] if len(c) > 1]; prm['joined'] = len(cv); prm.update({'join_'+k: v for k, v in self.join_params().items()})
-            np.savez(out, n=np.array([len(c) for c in cv]), pts=np.vstack(cv), measured=np.concatenate([m for c, m in zip(self.joined['lines'], self.joined['measured']) if len(c) > 1]), params=str(prm)); self.logmsg(f'saved {out} ({len(cv)} joined lines)'); return
+            np.savez(out, n=np.array([len(c) for c in cv]), pts=np.vstack(cv), measured=np.concatenate([m for c, m in zip(self.joined['lines'], self.joined['measured']) if len(c) > 1]), params=str(prm), **self._stage_arrays()); self.logmsg(f'saved {out} ({len(cv)} joined lines)'); return
         if self.refined is not None:                                                  # refined lines replace their walk lines (a line refined into
             done = sorted(set(self.refined['index']))                                 # several pieces gives several lines; one into none is dropped)
             cv = [c for i, c in enumerate(cv) if i not in done]+[c for c in self.refined['lines'] if len(c) > 1]
             prm['refined'] = len(done); prm.update({'refine_'+k: v for k, v in self.refine_params().items() if k not in ('walk', 'tune')}); prm['pieces_merge_margin'] = self.sp_rmargin.value()
-        np.savez(out, n=np.array([len(c) for c in cv]), pts=np.vstack(cv), params=str(prm)); self.logmsg(f'saved {out} ({prm.get("refined", 0)} refined lines)')
+        np.savez(out, n=np.array([len(c) for c in cv]), pts=np.vstack(cv), params=str(prm), **self._stage_arrays()); self.logmsg(f'saved {out} ({prm.get("refined", 0)} refined lines)')
 
     def dump(self):
         """Everything on screen, to out/debug/<time>/: dots.npz (cube centres, drawn positions, grid), lines.npz (points,
@@ -595,9 +612,8 @@ class App(QtWidgets.QMainWindow):
             if self.curves:
                 np.savez(os.path.join(d, 'lines.npz'), n=np.array([len(c) for c in self.curves]), pts=np.vstack(self.curves)); prm['lines'] = len(self.curves)
             if self.refined is not None and self.refined['lines']:
-                r_ = self.refined; T = r_['tubes']
-                np.savez(os.path.join(d, 'refined.npz'), n=np.array([len(c) for c in r_['lines']]), pts=np.vstack(r_['lines']), index=np.array(r_['index']),
-                         dots=np.vstack([t['dots'] for t in T]), turn=np.concatenate([t['turn'] for t in T]), size=T[0]['size'])
+                r_ = self.refined; T = r_['tubes']; tube = dict(dots=np.vstack([t['dots'] for t in T]), turn=np.concatenate([t['turn'] for t in T]), size=T[0]['size']) if T else {}   # pieces put back by Load lines… have no tubes
+                np.savez(os.path.join(d, 'refined.npz'), n=np.array([len(c) for c in r_['lines']]), pts=np.vstack(r_['lines']), index=np.array(r_['index']), **tube)
                 prm['refined'] = len(set(r_['index'])); prm.update({'refine_'+k: v for k, v in self.refine_params().items() if k not in ('walk', 'tune')})
             if self.joined is not None:
                 J = self.joined; np.savez(os.path.join(d, 'joined.npz'), n=np.array([len(c) for c in J['lines']]), pts=np.vstack(J['lines']), measured=np.concatenate(J['measured']), walk=np.array(J['walk']),

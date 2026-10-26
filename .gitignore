@@ -19,3 +19,6 @@ Thumbs.db
 
 # Diagnostic outputs
 out/
+
+# Lines tool: the files last in use on this machine
+Lines/last.json

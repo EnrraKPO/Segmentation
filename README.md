@@ -661,3 +661,69 @@ Open for tomorrow: write the fine walk settings and the end-line avoidance into 
   touches); overlapping pairs 23 608 -> 1 443. Join on the merged pieces: A bridged 569, refused 1379 (was 2075), B tees
   1491 (was 2991), corners 1122, loose 4437, 3525 lines. Why refine makes duplicates is not yet looked into (at cut 1 the
   whole tube is dots; a second seed inside the tube walks the same crease again).
+- Load lines (2026-10-23, late): "Load lines…" puts back the lines of an earlier session so the expensive stages need not
+  be rerun: a Save lines file (which now stores the stages alongside the flat set: walk lines with their shared merge
+  nodes, refined pieces with their walk index, the joined set with its measured flags) or any .npz of a debugging dump
+  folder (lines.npz, refined.npz, joined.npz). Older save files hold one flat set and come back as walk lines. Loaded
+  refined pieces carry no tube (the dump then writes refined.npz without the tube dots). Smoke test:
+  scratch/20261023_joints/load_smoke.py (dump -> app -> save -> load back, counts and points equal).
+
+## Session notes 2026-10-23 (night): the painting tool (paint.py, regions.py, bambu3mf.py)
+
+- Decided: segmentation and painting go into a SEPARATE app, `paint.py` (`run_paint.bat`), which loads the model and a Save
+  lines file (or a dump's lines.npz) and lets the user pick walk / refined / joined lines. `linesio.py` now holds the file
+  readers (`read_lines`, `load_mesh`), shared by both apps. Rules settled with the user: the mesh is NEVER changed (no cut,
+  no re-mesh; the output carries the input mesh as it came); the triangle layout has no say in where a border runs; no
+  design decision from the orc's numbers alone.
+- `regions.py`: the lines become the exact borders of regions. Every node is dropped onto its closest surface point (VTK
+  static cell locator, 8 s for 300k nodes); the stretch between consecutive nodes is the straight segment in the strip of
+  triangles unfolded flat between them (depth-first search over strips, depth handle 8, funnel pruning; a stretch that
+  finds no strip is bisected on the surface, up to 8 rounds; consecutive nodes within 1e-6 mm are one node). Per crossed
+  triangle the strokes split the area into pieces (shapely polygonize, on the cores); pieces connect across shared edge
+  stretches between edge points, never across a stroke; connected components = regions. Regions below an area handle
+  (default 0.16 mm2 = a 0.4 mm nozzle squared) are absorbed into their largest neighbour. Greedy 9-colour pre-colouring.
+  Sphere checks (`scratch/20261023_paint/synthetic.py`): closed circle 2 regions, crossing circles 4, open arc 1.
+- Orc, walk lines of dump 20261023_114229 (`scratch/20261023_paint/smoke.py`, renders `out/paint_walk_*.png`): 56 s;
+  182k crossed triangles, 401k pieces; 11 982 regions, 11 191 slivers absorbed -> 791; 662 stretches of 300k not drawn
+  through (surface points far apart or on opposite sides of a thin sheet: left as gaps, reported). The body is still two
+  leaked regions of 36k and 29k mm2: the walk lines do not close there. Depth 32 in the strip search costs 20x (158 s on
+  150 lines) for 15 % fewer undrawn stretches: not worth it, default 8.
+- `bambu3mf.py`: export as a Bambu Studio project with the untouched mesh and a `paint_color` note per triangle, Bambu's
+  own mechanism for brush strokes (encoding read from BambuStudio's TriangleSelector.cpp / Model.cpp; every string of a
+  real Bambu-painted file decodes and re-encodes identically, `scratch/20261023_paint/bambu_check.py`). A crossed triangle
+  is split in four recursively where a border still runs through a child, down to `fine` (0.05 mm) or `depth` (8); a leaf
+  takes the colour of the region under its centre. Orc: notes 172 s on 32 cores, 24.9 MB project (`out/orc_painted.3mf`).
+  NOT yet opened in Bambu Studio: whether it reads the colours as painted is the first thing to check next session.
+- Open: Bambu Studio check; speed of the notes; the leaked body (a join/seal before painting, or the joined set); brush
+  and split/merge tools; the walk lines' undrawn stretches.
+
+## Session notes 2026-10-24 (night): why the lines leak, and the walk concept settled (reach, crawl, strength, snap)
+
+- Painting the orc with the walk lines showed the regions wrong where it matters most (hair): 2282 of 4292 walk line ends
+  are loose, 4353 of 7240 in the joined set, and the joined set paints WORSE than the raw walk lines. Step B of the join
+  (bridge.py) closes 0 of 13 hair pairs: its corner test compares an extended line to the other line's unextended end.
+  Judged no good; dropped from the plan rather than tuned. The loose ends of the hair lines carry hooks and curls that the
+  crease does not have: the walker reaching past a hole grabs a flank dot and bends off.
+- Concept settled with the user (`scratch/20261023_paint/walk_crawl2.py` is the experiment, on a 22 mm box around the hair):
+  1. **No reach.** reach = one step; the line dies at a hole in the dots instead of grabbing beside the trail.
+  2. **The crawl.** When the walker finds no anchor it spawns fine dots (refine's cube machinery, finer 3, NO cut) in a
+     cloud ahead of its last node, adds them to the dots it walks on and looks again. Fine dots are dots like any other;
+     one walker, no second walk, no matching. Successive crawls are the same process repeating. Fine dots are cached per
+     2 mm block (883 blocks on the patch, 250 s: the cost that still has to be engineered). The cut of stage 1 exists
+     SOLELY to keep the dot count tractable; with no cut the walker must read strength itself.
+  3. **Strength.** Stronger dots weigh more in the direction of the crease: the axis is now a strength-weighted PCA
+     (`axisp`, handle "Axis: power of strength", 2 = squared, 0 = positions only as before). Anchor choice (astr) and the
+     band reading still look at positions only: not yet done.
+  4. **Every node on the surface.** Stop nodes floated 0.095 mm off the surface (median; 0.022 for all nodes): the centre
+     of a wide band across a rounded groove lies above the groove, the trend bends away and the next band fails the 45 deg
+     cone. Rule: no amount of strength pulls a node off the surface. Every node is moved along the band's facing onto the
+     surface (ray both ways, nearest point if the ray misses). trace4.walk takes `snap` (point, facing -> point).
+- Hair patch results (dead ends inside the view box; 219 with the app's walk): reach one step + spawn 46; + cache 33, all
+  21 no-anchor stops failing the cone with bands 0.9-1.8 mm wide; + axisp 2 alone 38 (no fix); + snap 26, only ONE
+  no-anchor stop, the rest at the box border. Lines end on other lines (band_owned 101, collision 19, loop 14). The snap
+  moved nodes p50 0.003 / p90 0.013 / max 0.267 mm. 82 lines, 8437 nodes, 398 s. `out/walk_crawl2_hair.png`.
+- What is in the app: `axisp` and the `snap` hook in trace4.walk, but app.py passes no snap and still reaches. NOT in the
+  app: reach = one step, the spawn, the fine-dot cache, the snap function. The app's lines are unchanged apart from the
+  axis weighting. Not yet tested: a crease that truly fades, so the walker is seen stopping on its own.
+- Next: build the crawl into the walk stage (spawn, cached fine dots, snap, reach one step) with handles; weight anchor
+  and band by strength; cost of the fine dots; then the orc, then paint; Bambu Studio check of `out/orc_painted.3mf`.

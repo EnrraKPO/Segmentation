@@ -31,6 +31,8 @@ def walk(X, wgt, N, size, log=print, **kw):
     minlen = int(kw.get('minlen', 8)); owned_frac = kw.get('owned', 0.5); valley = kw.get('valley', 1.3); core_frac = kw.get('core', 0.0); grow = kw.get('grow', 99.0); lead_k = kw.get('lead', 0.0); lead_min = int(kw.get('leadmin', 8)); fringe = kw.get('fringe', 1.0) > 0; ridge = kw.get('ridge', 0.0) > 0; sparse = kw.get('sparse', 0.0); hill = kw.get('hill', 0.0) > 0
     smooth = kw.get('smooth', 0.0); smoothband = kw.get('smoothband', 0.0) > 0; smooth_n = max(float(kw.get('smoothreach', 100)), 1e-9)   # SMOOTH: backward smoothing strength (0 = off): each new node pulls the earlier nodes toward the midpoint of their neighbours, fading over SMOOTHREACH nodes; SMOOTHBAND: the pull slides a node only across its band and fades beyond the band's half-width
     curve = kw.get('curve', 1) > 0   # CURVE: the trend is an arc fitted over the chain (nodes weighted by recency, fading over TREND nodes), continued one step ahead; off: the chord over the last TREND nodes
+    snap = kw.get('snap')          # SNAP (2026-10-24): a function (point, facing) -> point on the surface; every node is pushed along the band's facing onto the surface. No node floats.
+    axisp = kw.get('axisp', 2.0)   # AXISP: power of a dot's strength in its say on the axis direction (0 = positions alone, as before 2026-10-24)
     touch = kw.get('touch', 1.8); selfhit = kw.get('selfhit', 1.5); back_min = int(kw.get('backmin', 15)); wmem = kw.get('wmem', 0.7); sphgrow = kw.get('sphgrow', 3.0); maxnodes = int(kw.get('maxnodes', 20000)); axismin = int(kw.get('axismin', 4))   # TOUCH: dots touch within this many units (cube diagonal 1.73); SELFHIT: a line hits itself within this many units; BACKMIN: at least this many latest nodes ignored for the self-hit; WMEM: share of the old band width kept per node; SPHGROW: axis sphere grows to this times the band width; MAXNODES: cap per half line; AXISMIN: dots needed for an axis
     walk.probe = []
     tree = cKDTree(X); n = len(X); owner = np.full(n, -1); lines = []; node_tree = None; node_owner = np.zeros(0, int); all_nodes = np.zeros((0, 3))
@@ -45,9 +47,11 @@ def walk(X, wgt, N, size, log=print, **kw):
         return float((wgt[c][m]*np.exp(-(ac[m]/lookw)**2)).sum())                  # dots near the corridor's centre line count most
 
     def axis_at(a, radius):
+        """the direction along which the STRENGTH in the sphere spreads: each dot counts with its strength to the power
+        AXISP (2026-10-24: with dots everywhere, positions alone have no direction; the crease is where the strength lies)"""
         nb = np.array(tree.query_ball_point(X[a], radius), int)
         if len(nb) < axismin: return None, None
-        d = X[nb]-X[nb].mean(0); ev, vec = np.linalg.eigh(d.T @ d)
+        w = wgt[nb]**axisp; w = w/w.sum(); d = X[nb]-(w[:, None]*X[nb]).sum(0); ev, vec = np.linalg.eigh((w[:, None]*d).T @ d)
         if ev[-1] < align*align*max(ev[-2], 1e-9): return None, None
         return vec[:, -1], nb
 
@@ -154,6 +158,7 @@ def walk(X, wgt, N, size, log=print, **kw):
         bd, bw, u0, bc = band
         if ((owner[bd] != -1) & (owner[bd] != tid)).mean() > owned_frac: continue      # that line is drawn already
         level0 = float(wgt[bc].max()); w0 = node_w(bc, level0); p0 = (X[bc]*w0[:, None]).sum(0)/w0.sum(); p0 = X[s]+(p0-X[s])-((p0-X[s]) @ h)*h; claimed = list(bd); owner[bd] = tid
+        if snap is not None: p0 = snap(p0, (N[bc]*w0[:, None]).sum(0))
         halves = []; back = max(int(2*slice_h/step)+3, back_min)
         reasons = []; ends_at = []; halves_w = []
         for sign in (1, -1):
@@ -200,6 +205,7 @@ def walk(X, wgt, N, size, log=print, **kw):
                         if st+sa > 0: f = pull*st/(pull*st+sa); stats['look_trend' if f > 0.8 else 'look_dots' if f < 0.2 else 'look_mixed'] += 1
                         walk.probe.append((f, st, sa, float(np.linalg.norm(pn-pred)), float(np.degrees(np.arccos(np.clip(abs(ha @ d), 0, 1)))), float(np.linalg.norm(pred-(nodes[-1]+((X[a]-nodes[-1]) @ d)*d))), float(np.linalg.norm(((1-f)*pn+f*pred)-(nodes[-1]+((X[a]-nodes[-1]) @ d)*d)))))
                     pn = (1-f)*pn+f*pred
+                if snap is not None: pn = snap(pn, (N[bc]*wn[:, None]).sum(0))   # onto the surface along the band's facing: sideways where the strength put it, in height on the surface
                 old = np.array(nodes[:-back]) if len(nodes) > back else None
                 if old is not None:
                     dist = np.linalg.norm(old-pn, axis=1); kmin = int(np.argmin(dist))
