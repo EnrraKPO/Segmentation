@@ -43,9 +43,8 @@ SETTINGS = [   # key, label, default, lo, hi, step, decimals, tip
     ('reach', 'Paint reach (cubes)', 1, 1, 10, 1, 0, 'Two dots touch when their cubes lie within this many cubes of each other. 1: next door only, one missing dot splits the band. 2: one empty cube is crossed, so grid noise does not split the band; each round then paints two cubes deep. Changing it rebuilds the neighbour table on the next Start walk.'),
     ('window', 'Node window (rows)', 3, 0, 50, 1, 0, 'A node reads the crease direction and its across position from the dots of this many rows before and after its own row (2 x window + 1 rows). The paint runs this many rows ahead of the nodes. 0: the row alone.'),
     ('gap', 'Gap radius (mm)', 0.0, 0, 10, 0.001, 4, 'At a dead end, the unpainted dots within this distance of the front that lie ahead along the arm become the next row, so a hole in a narrow band is crossed. 0 turns it off.'),
-    ('fork', 'Faulty row (deg)', 20, 1, 90, 1, 0, "A row is faulty when its own arrows are more than this many degrees off right angles to the stem's line (a stem reads 2-8, a fork 15-50). Faulty rows ahead are dropped from a node's window; a node whose own row is faulty cuts the stem: the branches open from the node before."),
-    ('kink', 'Loose branch (deg)', 30, 1, 90, 1, 0, "A branch's first segment, from the junction to its first node, must run along the stem's line or along the branch's own direction. Off both by more than this many degrees it follows no crease: the branch is cut loose from the junction and walked on as a line of its own (a real fork reads 1-15 off its own line, a false one 40-90)."),
-    ('lead', 'Second crest (share of the crest)', 0.0, 0, 1, 0.05, 2, "A row is read across, every dot at full strength: from its strongest crest outward, a rise after a dip is a second crest. A rise over this share of the crest's strength makes the row two rows: the arm keeps the crest its last row sits on, the other crest becomes a second band under the same paint, an arm of its own from a junction on the stem. 0: any dip counts."),
+    ('fork', 'Faulty row (deg)', 20, 1, 90, 1, 0, "A row is faulty when its own arrows are more than this many degrees off right angles to the arm's line (a crease reads 2-8, a fork 15-50). Faulty rows ahead are dropped from a node's window; a node whose own row is faulty cuts the line there: the arm ends at the node before, the rows from the faulty one on are freed for other lines."),
+    ('lead', 'Second crest (share of the crest)', 0.0, 0, 1, 0.05, 2, "A freshly painted row is read across, every dot at full strength: a dip between two crests is a valley when its rise is over this share of the lower crest. The dots past a valley are let go (unpainted again, free for another line); the arm keeps the side holding its reference, the centre of the row before. 0: any dip counts."),
     ('cap', 'Finding cap (rounds)', 30, 2, 1000, 1, 0, 'The finding stage halts when the ring has not split in two within this many rounds. A cap for Run, not a rule.'),
     ('maxnodes', 'Run cap (nodes)', 100000, 10, 10000000, 1000, 0, 'Run stops after this many nodes.'),
 ]
@@ -53,17 +52,21 @@ SETTINGS_DEFAULTS = {k: v for k, _, v, *_ in SETTINGS}
 TIPS = dict(
     seed='Strongest free dot: the walk starts at the strongest dot no line has painted. Picked dot: the dot you clicked in the viewport (click a dot without dragging).',
     start='Begins a line at the seed: its dot is painted and the finding stage is set to spread. Nothing is read yet.',
-    read='One read. Spread: paint every unpainted dot touching the front. Clump: group the new dots by touching. Direction: the crease direction from the arrows of the rows around the node. Node: decide (ring, line found, branch, end) and place the node: across at the centre of those rows, along at its own row.',
+    read='One read. Spread: paint every unpainted dot touching the front. Clump: group the new dots by touching. Direction: the crease direction from the arrows of the rows around the node. Node: decide (ring, line found, which clump is ours, a joint, the end) and place the node: across at the centre of those rows, along at its own row.',
     node='Reads until a node is placed or the walk halts.',
-    run='Reads until the arm under way halts (its end, a junction, a collision) or a split comes under test, then stops so you can look.',
-    runall='Reads until the whole walk is done: every arm, every junction.',
+    run='Reads until the arm under way halts (its end, a joint with another line, a cut at a faulty row), then stops so you can look.',
+    runall='Reads until the whole walk is done: both arms.',
     runlines='Walks every line in the set: the strongest free dot seeds a line, it is run to its end, and so on until no free dot is left. Every read goes to the session log file; the box gets one line per finished line.',
-    find='Type a name and press Enter to select it and move the camera there. A dot: "dot 53873" (or just 53873), its number in the loaded set, as the log names it. A node: "L2 a5 n7" (line 2, arm 5, node 7, numbered as the log does), "L2 seed" or "L2 a5 start".',
+    find='Type a name and press Enter to select it and move the camera there. A dot: "dot 53873" (or just 53873), its number in the loaded set, as the log names it. A node: "L2 a1 n7" (line 2, arm 1, node 7, numbered as the log does), "L2 seed" or "L2 a1 joint". A line: "L2 a0 + a1" or "L2".',
     paint='Draws the dots the lines have painted: khaki for earlier lines, tan for the line under way. Off: only the current read (front, clumps, window) stays on the dots.',
     reset='Drops the walk under way and frees its dots. Finished lines stay.',
     clear='Frees every dot and drops every line.',
 )
 
+
+COLOUR_WORDS = dict(khaki='khaki', tan='tan', white='white', yellow='yellow', lightgreen='light green', hotpink='pink', salmon='salmon', darkgreen='dark green', blue='blue', navy='navy',
+                    purple='purple', magenta='magenta', red='red', lime='bright green', cyan='cyan', orangered='orange-red', orange='orange', darkorchid='violet', saddlebrown='brown',
+                    teal='teal', gold='gold', maroon='maroon', olive='olive', steelblue='steel blue', grey='grey')   # the legend names each colour in words, so an entry can be matched by word, not by shade
 
 LAST_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'last.json')   # the model and dot set last in use
 
@@ -128,7 +131,6 @@ class SettingsDialog(QtWidgets.QDialog):
         if k == 'window' and self.app.walk is not None: self.app.walk.window = int(v); self.app.logmsg(f'window {int(v)}: applies from the next node')
         if k == 'gap' and self.app.walk is not None: self.app.walk.gap = float(v); self.app.logmsg(f'gap radius {v:g} mm: applies from the next dead end')
         if k == 'fork' and self.app.walk is not None: self.app.walk.fork = float(v); self.app.logmsg(f'faulty row {v:g} deg: applies from the next node')
-        if k == 'kink' and self.app.walk is not None: self.app.walk.kink = float(v); self.app.logmsg(f'loose branch {v:g} deg: applies from the next branch')
         if k == 'lead' and self.app.walk is not None: self.app.walk.lead = float(v); self.app.logmsg(f'second crest {v:g} of the crest: applies from the next row')
         if k in ('dotlift', 'dotsize', 'linelift'): self.app.redraw()
     def _shade(self, on): self.app.flat_shading = on; self.app.redraw()
@@ -138,62 +140,92 @@ class App(QtWidgets.QMainWindow):
     def __init__(self):
         super().__init__(); self.setWindowTitle('Lines'); self.resize(1500, 950)
         self.P = self.F = None; self.path = None; self.dots = None; self.dots_path = None; self.dots_meta = {}; self.settings = dict(SETTINGS_DEFAULTS); self.flat_shading = False; self.dlg = None
-        self.walk = None; self.picked = None; self.pnode = None; self.act_dots = None; self.pickables = []; self._press = None; self.snap = None; self.settings_mesh_colour = 'lightsteelblue'; self.mesh_pv = None
+        self.walk = None; self.picked = None; self.pnode = None; self.pline = None; self.act_dots = None; self.pickables = []; self._press = None; self.snap = None; self.settings_mesh_colour = 'lightsteelblue'; self.mesh_pv = None
         try: self.file_log, log_path = open_session_log()
         except Exception: self.file_log, log_path = None, None
-        root = QtWidgets.QWidget(); self.setCentralWidget(root); lay = QtWidgets.QHBoxLayout(root)
-        self.plotter = QtInteractor(root); lay.addWidget(self.plotter.interactor, 1)
+        root = QtWidgets.QSplitter(QtCore.Qt.Horizontal); self.setCentralWidget(root)                            # viewport | panel, the divider dragged at will
+        self.plotter = QtInteractor(root); root.addWidget(self.plotter.interactor)
         self.plotter.iren.add_observer('LeftButtonPressEvent', self._on_press); self.plotter.iren.add_observer('LeftButtonReleaseEvent', self._on_release)
         from vtkmodules.vtkRenderingCore import vtkRenderer
         self.ren_top = vtkRenderer(); self.ren_top.SetLayer(1); self.ren_top.InteractiveOff(); self.plotter.ren_win.SetNumberOfLayers(2); self.plotter.ren_win.AddRenderer(self.ren_top)
         self.ren_top.SetActiveCamera(self.plotter.renderer.GetActiveCamera())   # the overlay: lines, nodes and arrows are drawn here, over the mesh and the dots, never hidden by them
-        panel = QtWidgets.QWidget(); panel.setMinimumWidth(620); panel.setMaximumWidth(900); lay.addWidget(panel, 0); side = QtWidgets.QVBoxLayout(panel); side.setContentsMargins(0, 0, 0, 0); side.setSpacing(4)
-        top = QtWidgets.QGridLayout(); top.setContentsMargins(0, 0, 0, 0); side.addLayout(top)                                     # files: a small button and its label side by side
+        scroll = QtWidgets.QScrollArea(); scroll.setWidgetResizable(True); scroll.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarAsNeeded); scroll.setMinimumWidth(380); root.addWidget(scroll)
+        panel = QtWidgets.QWidget(); scroll.setWidget(panel); side = QtWidgets.QVBoxLayout(panel); side.setContentsMargins(6, 6, 6, 6); side.setSpacing(8)
+        root.setStretchFactor(0, 1); root.setStretchFactor(1, 0); root.setSizes([900, 560]); root.setCollapsible(0, False); root.setCollapsible(1, False)
+
+        def wrap(lbl):
+            """a label that wraps and may be squeezed: without this a long text widens the whole panel past its area"""
+            lbl.setWordWrap(True); lbl.setMinimumWidth(1); return lbl   # an explicit minimum: a wrapped label's own minimum is its unwrapped width, which stretched the panel
+        def group(title, tip=''):
+            g = QtWidgets.QGroupBox(title); g.setToolTip(tip); side.addWidget(g); return g
+        def button(grid, text, fn, tip, per_row=3, danger=False):
+            b = QtWidgets.QPushButton(text); b.clicked.connect(fn); b.setToolTip(tip); b.setMinimumHeight(30); n = grid.count(); grid.addWidget(b, n//per_row, n%per_row)
+            if danger: b.setStyleSheet('QPushButton { color: #7a1f1f; }')
+            return b
+
+        # 1. files
+        g0 = group('Files'); top = QtWidgets.QGridLayout(g0); top.setColumnStretch(1, 1)
         self.btn_load = QtWidgets.QPushButton('Load mesh…'); self.btn_load.clicked.connect(self.load); top.addWidget(self.btn_load, 0, 0)
-        self.lbl_file = QtWidgets.QLabel('no model'); self.lbl_file.setWordWrap(True); top.addWidget(self.lbl_file, 0, 1)
+        self.lbl_file = wrap(QtWidgets.QLabel('no model')); top.addWidget(self.lbl_file, 0, 1)
         self.btn_load_dots = QtWidgets.QPushButton('Load dots…'); self.btn_load_dots.clicked.connect(self.load_dots); self.btn_load_dots.setToolTip('A dot set saved by the Dots tool (its out/dots). Opening a mesh loads its last set by itself.'); top.addWidget(self.btn_load_dots, 1, 0)
-        self.lbl_dots = QtWidgets.QLabel('no dots'); self.lbl_dots.setWordWrap(True); top.addWidget(self.lbl_dots, 1, 1); top.setColumnStretch(1, 1)
+        self.lbl_dots = wrap(QtWidgets.QLabel('no dots')); top.addWidget(self.lbl_dots, 1, 1)
 
-        def button(grid, text, fn, tip):
-            b = QtWidgets.QPushButton(text); b.clicked.connect(fn); b.setToolTip(tip); n = grid.count(); grid.addWidget(b, n//3, n%3); return b   # three small buttons per row
+        # 2. the picked thing: its name and strength stand out; everything else about it below, small
+        g1 = group('Picked', 'Click a dot, a node or a line in the viewport (a click without dragging). Its name is shown here.'); v1 = QtWidgets.QVBoxLayout(g1); v1.setSpacing(4)
+        self.lbl_name = wrap(QtWidgets.QLabel('nothing picked')); self.lbl_name.setTextInteractionFlags(QtCore.Qt.TextSelectableByMouse)
+        self.lbl_name.setStyleSheet('QLabel { font-size: 20px; font-weight: bold; color: #1b4f9c; padding: 4px; background: #eef3fb; border: 1px solid #c5d3ea; border-radius: 4px; }'); v1.addWidget(self.lbl_name)
+        self.lbl_key = wrap(QtWidgets.QLabel('')); self.lbl_key.setStyleSheet('QLabel { font-size: 15px; font-weight: bold; padding: 2px 4px; }'); v1.addWidget(self.lbl_key)
+        self.lbl_pick = wrap(QtWidgets.QLabel('click a dot, a node or a line in the viewport')); self.lbl_pick.setStyleSheet('QLabel { color: #444; padding: 0 4px; }'); self.lbl_pick.setTextInteractionFlags(QtCore.Qt.TextSelectableByMouse); v1.addWidget(self.lbl_pick)
+        fr = QtWidgets.QHBoxLayout(); v1.addLayout(fr)
+        self.ed_find = QtWidgets.QLineEdit(); self.ed_find.setPlaceholderText('find: dot 53873  /  L2 a5 n7  /  L2 a5'); self.ed_find.returnPressed.connect(self.find_named); self.ed_find.setToolTip(TIPS['find']); fr.addWidget(self.ed_find, 1)
+        pg = QtWidgets.QGridLayout(); pg.setSpacing(3); v1.addLayout(pg)
+        self.btn_copy = button(pg, 'Copy the name', self.copy_name, 'Puts the name of the picked dot ("dot 53873"), node ("L2 a5 n7") or line ("L2 a5") on the clipboard.', 2)
+        self.btn_look = button(pg, 'Look at it', self.look_at_seed, 'Moves the camera to the picked dot or node, else to the seed of the walk under way.', 2)
 
-        g2 = QtWidgets.QGroupBox('Walk'); v2 = QtWidgets.QVBoxLayout(g2); v2.setSpacing(3)
-        sw = QtWidgets.QWidget(); sh = QtWidgets.QHBoxLayout(sw); sh.setContentsMargins(0, 0, 0, 0)
-        self.cb_seed = QtWidgets.QComboBox(); self.cb_seed.addItems(['Strongest free dot', 'Picked dot']); self.cb_seed.setToolTip(TIPS['seed']); sh.addWidget(QtWidgets.QLabel('Seed')); sh.addWidget(self.cb_seed)
-        self.ed_find = QtWidgets.QLineEdit(); self.ed_find.setPlaceholderText('dot 53873  /  L2 a5 n7'); self.ed_find.returnPressed.connect(self.find_named); self.ed_find.setToolTip(TIPS['find']); sh.addWidget(QtWidgets.QLabel('Find')); sh.addWidget(self.ed_find, 1)
-        self.ed_stop = QtWidgets.QLineEdit(); self.ed_stop.setPlaceholderText('dot'); self.ed_stop.setMaximumWidth(70); self.ed_stop.textChanged.connect(self.set_stop); self.ed_stop.setToolTip('A breakpoint: a dot number. Every step or run pauses right after the read that paints this dot (once per line). Step or run again to go on. Empty: no breakpoint.'); sh.addWidget(QtWidgets.QLabel('Stop at')); sh.addWidget(self.ed_stop); v2.addWidget(sw)
-        bg = QtWidgets.QGridLayout(); bg.setContentsMargins(0, 0, 0, 0); bg.setSpacing(2); v2.addLayout(bg)   # the buttons, three per row
+        # 3. the walk, stepped: the buttons clicked all the time, nothing here loses work
+        g2 = group('Walk', 'Stepping the walk under way. Nothing here is costly or loses work.'); v2 = QtWidgets.QVBoxLayout(g2); v2.setSpacing(4)
+        sw = QtWidgets.QHBoxLayout(); v2.addLayout(sw)
+        self.cb_seed = QtWidgets.QComboBox(); self.cb_seed.addItems(['Strongest free dot', 'Picked dot']); self.cb_seed.setToolTip(TIPS['seed']); sw.addWidget(QtWidgets.QLabel('Seed')); sw.addWidget(self.cb_seed, 1)
+        self.ed_stop = QtWidgets.QLineEdit(); self.ed_stop.setPlaceholderText('dot'); self.ed_stop.setMaximumWidth(80); self.ed_stop.textChanged.connect(self.set_stop); self.ed_stop.setToolTip('A breakpoint: a dot number. Every step or run pauses right after the read that paints this dot (once per line). Step or run again to go on. Empty: no breakpoint.'); sw.addWidget(QtWidgets.QLabel('Stop at')); sw.addWidget(self.ed_stop)
+        bg = QtWidgets.QGridLayout(); bg.setSpacing(3); v2.addLayout(bg)
         self.btn_start = button(bg, 'Start walk', self.start_walk, TIPS['start'])
         self.btn_read = button(bg, 'Next read', self.next_read, TIPS['read'])
         self.btn_node = button(bg, 'Next node', self.next_node, TIPS['node'])
-        self.btn_run = button(bg, 'Run to the next halt', self.run_walk, TIPS['run'])
-        self.btn_runall = button(bg, 'Run to the end', self.run_all, TIPS['runall'])
-        self.btn_runlines = button(bg, 'Run all lines', self.run_all_lines, TIPS['runlines'])
-        self.btn_reset = button(bg, 'Reset this walk', self.reset_walk, TIPS['reset'])
-        self.btn_clear = button(bg, 'Clear all lines', self.clear_lines, TIPS['clear'])
-        self.btn_copy = button(bg, 'Copy the picked name', self.copy_name, 'Puts the name of the picked dot ("dot 53873") or node ("L2 a5 n7") on the clipboard.')
-        self.btn_look = button(bg, 'Look at the seed', self.look_at_seed, 'Moves the camera to the seed of the walk under way (or the picked dot), at a few millimetres.')
-        self.btn_dump = button(bg, 'Dump for debugging', self.dump, 'Writes the walk, its records and the settings to out/debug.')
-        self.btn_settings = button(bg, 'Settings…', self.open_settings, 'The walk handles.')
-        self.lbl_pick = QtWidgets.QLabel('no dot picked (click a dot in the viewport)'); self.lbl_pick.setWordWrap(True); v2.addWidget(self.lbl_pick)
-        self.lbl_state = QtWidgets.QLabel('no walk'); self.lbl_state.setWordWrap(True); self.lbl_state.setTextInteractionFlags(QtCore.Qt.TextSelectableByMouse); v2.addWidget(self.lbl_state)
-        side.addWidget(g2)
-        cg = QtWidgets.QGridLayout(); cg.setContentsMargins(0, 0, 0, 0); cg.setSpacing(2); side.addLayout(cg)   # the view toggles, two per row
+        bg2 = QtWidgets.QGridLayout(); bg2.setSpacing(3); v2.addLayout(bg2)
+        self.btn_run = button(bg2, 'Run to the next halt', self.run_walk, TIPS['run'], 2)
+        self.btn_runall = button(bg2, 'Run this line to its end', self.run_all, TIPS['runall'], 2)
+        self.lbl_state = wrap(QtWidgets.QLabel('no walk')); self.lbl_state.setTextInteractionFlags(QtCore.Qt.TextSelectableByMouse)
+        self.lbl_state.setStyleSheet('QLabel { padding: 4px; background: #f6f6f0; border: 1px solid #d8d8c8; border-radius: 4px; }'); v2.addWidget(self.lbl_state)
+
+        # 4. the view
+        g3 = group('View'); v3 = QtWidgets.QVBoxLayout(g3); v3.setSpacing(3)
+        self.lbl_legend = wrap(QtWidgets.QLabel('')); self.lbl_legend.setTextFormat(QtCore.Qt.RichText); self.lbl_legend.setToolTip('What the colours in the viewport mean, for what is on screen now.')
+        self.lbl_legend.setStyleSheet('QLabel { background: #262626; color: white; font-size: 13px; padding: 6px; border-radius: 4px; }'); v3.addWidget(self.lbl_legend)
+        cg = QtWidgets.QGridLayout(); cg.setSpacing(3); v3.addLayout(cg)
         def check(text, tip=None, on=True):
-            b = QtWidgets.QCheckBox(text); b.setChecked(on); b.setToolTip(tip or ''); b.stateChanged.connect(lambda s: self.redraw()); n = cg.count(); cg.addWidget(b, n//2, n%2); return b
+            b = QtWidgets.QCheckBox(text); b.setChecked(on); b.setToolTip(tip or ''); b.stateChanged.connect(lambda s: self.redraw()); cg.addWidget(b, cg.count(), 0); return b   # one per row: the texts are long
         self.chk_dots = check('Show dots')
-        self.chk_lines = check('Show lines and nodes', 'Off: the lines, their nodes and junctions are not drawn, finished or under way, so the dots behind them can be seen. The current read (front, clumps, window, direction) stays.')
+        self.chk_lines = check('Show lines and nodes', 'Off: the lines, their nodes and joints are not drawn, finished or under way, so the dots behind them can be seen. The current read (front, clumps, window, direction) stays.')
         self.chk_paint = check('Show painted dots', TIPS['paint'] + ' Khaki: earlier lines, tan: this line.')
         self.chk_shade = check('Shade dots by strength', 'Light = weak, black = strong.')
         self.chk_top = check('Hidden parts faint through the mesh', 'Hidden parts of lines are shown faint through the mesh; arrows always on top.')
-        self.chk_bands = check('Show valleys and dots let go', 'Orange-red: the valley dots of every trimmed row. Cyan: dots past a valley, let go by the line (unpainted again, free for another line).')
-        self.chk_legend = check('Legend')
-        fw = QtWidgets.QWidget(); fh = QtWidgets.QHBoxLayout(fw); fh.setContentsMargins(0, 0, 0, 0); fh.addWidget(QtWidgets.QLabel('Hidden parts'))
+        self.chk_bands = check('Show valleys and dots let go', 'Orange-red: the valley dots of every trimmed row. Cyan: dots let go by the line (past a valley, in another clump, past a cut or a joint): unpainted again, free for another line.')
+        self.chk_legend = check('Legend (above)', 'What the colours mean, for what is on screen now.')
+        fh = QtWidgets.QHBoxLayout(); v3.addLayout(fh); fh.addWidget(QtWidgets.QLabel('Hidden parts'))
         self.sl_faint = QtWidgets.QSlider(QtCore.Qt.Horizontal); self.sl_faint.setRange(0, 100); self.sl_faint.setValue(10); self.sl_faint.setToolTip('How visible the hidden parts of lines and nodes are: 0 invisible, 1 as solid as the visible parts.'); fh.addWidget(self.sl_faint, 1)
-        self.lbl_faint = QtWidgets.QLabel('0.10'); fh.addWidget(self.lbl_faint); side.addWidget(fw)
+        self.lbl_faint = QtWidgets.QLabel('0.10'); fh.addWidget(self.lbl_faint)
         self.faint_timer = QtCore.QTimer(self); self.faint_timer.setSingleShot(True); self.faint_timer.setInterval(80); self.faint_timer.timeout.connect(self.redraw)
         self.sl_faint.valueChanged.connect(lambda v: (self.lbl_faint.setText(f'{v/100:.2f}'), self.faint_timer.start()))
-        self.txt = QtWidgets.QPlainTextEdit(); self.txt.setReadOnly(True); self.txt.setMinimumHeight(200); side.addWidget(self.txt, 1)
+
+        # 5. heavy or irreversible: apart from the stepping buttons, so a stray click does not land here
+        g4 = group('Whole set, and undoing', 'Heavy runs and actions that throw work away. Kept apart from the stepping buttons.'); hg = QtWidgets.QGridLayout(g4); hg.setSpacing(3)
+        self.btn_runlines = button(hg, 'Run all lines (heavy)', self.run_all_lines, TIPS['runlines'], 2)
+        self.btn_reset = button(hg, 'Reset this walk', self.reset_walk, TIPS['reset'], 2, danger=True)
+        self.btn_clear = button(hg, 'Clear all lines…', self.clear_lines, TIPS['clear'] + ' Asks first.', 2, danger=True)
+        self.btn_dump = button(hg, 'Dump for debugging', self.dump, 'Writes the walk, its records and the settings to out/debug.', 2)
+        self.btn_settings = button(hg, 'Settings…', self.open_settings, 'The walk handles.', 2)
+
+        self.txt = QtWidgets.QPlainTextEdit(); self.txt.setReadOnly(True); self.txt.setMinimumHeight(220); self.txt.setLineWrapMode(QtWidgets.QPlainTextEdit.WidgetWidth); self.txt.setToolTip('The log: every read, with its numbers. Scrollable.'); side.addWidget(self.txt, 1)
         self.plotter.set_background('white'); self.plotter.add_axes()
         self.logmsg(f'session log: {log_path}' if log_path else 'no session log')
         self.busy(False)
@@ -220,7 +252,7 @@ class App(QtWidgets.QMainWindow):
         """load a mesh, then its dots: the set given, else the newest set saved for it"""
         try: self.P, self.F = load_mesh(path)
         except Exception as ex: QtWidgets.QMessageBox.critical(self, 'Load failed', str(ex)); return
-        self.path = path; self.lbl_file.setText(os.path.basename(path)); self.dots = None; self.dots_path = None; self.walk = None; self.picked = None; self.pnode = None; self.snap = None; self.mesh_pv = None
+        self.path = path; self.lbl_file.setText(os.path.basename(path)); self.dots = None; self.dots_path = None; self.walk = None; self.picked = None; self.pnode = None; self.pline = None; self.snap = None; self.mesh_pv = None
         self.logmsg(f'loaded {os.path.basename(path)}: {len(self.F)} faces')
         p = dots if dots and os.path.exists(dots) else last_dots(path)
         if p: self._use_dots(p)
@@ -244,7 +276,7 @@ class App(QtWidgets.QMainWindow):
         self.dots = fld; self.dots_path = p; self.dots_meta = dict(cut=cut, cube=cube, reach=reach, steep=steep); self.walk = None; self.picked = None; self.pnode = None
         self.lbl_dots.setText(f'{os.path.basename(p)}: {len(fld["idx"])} dots, cube {cube:g} mm, reach {reach}, cut {cut:g}')
         self.logmsg(f'loaded {len(fld["idx"])} dots from {os.path.basename(p)} (cube {cube:g} mm, reach {reach}, cut {cut:g})')
-        self.lbl_pick.setText('no dot picked (click a dot in the viewport)'); self.lbl_state.setText('no walk')
+        self.pline = None; self._show_picked('nothing picked', '', 'click a dot, a node or a line in the viewport'); self.lbl_state.setText('no walk')
 
     def load_dots(self):
         p, _ = QtWidgets.QFileDialog.getOpenFileName(self, 'Load dots', DOTS_DIR, 'Dot sets (*.npz)')
@@ -256,7 +288,7 @@ class App(QtWidgets.QMainWindow):
         if self.walk is None:
             t0 = time.time()
             if self.snap is None: self.snap = make_snap(self.P, self.F)
-            self.walk = walkmod.Walk(self.dots, snap=self.snap, log=self.logmsg, cap=int(self.settings['cap']), reach=int(self.settings['reach']), window=int(self.settings['window']), gap=float(self.settings['gap']), fork=float(self.settings['fork']), kink=float(self.settings['kink']), lead=float(self.settings['lead']))
+            self.walk = walkmod.Walk(self.dots, snap=self.snap, log=self.logmsg, cap=int(self.settings['cap']), reach=int(self.settings['reach']), window=int(self.settings['window']), gap=float(self.settings['gap']), fork=float(self.settings['fork']), lead=float(self.settings['lead']))
             self.logmsg(f'walk ready: {self.walk.k} dots, neighbour table at reach {self.walk.reach} in {time.time()-t0:.1f} s'); self.set_stop()
         return self.walk
 
@@ -288,7 +320,8 @@ class App(QtWidgets.QMainWindow):
         if c is None: self.lbl_state.setText('no walk')
         else:
             s = f'line {c["id"]}: {c["stage"]}, round {c["round"]}' + (f', arm {c["arm"]} of {len(c["arms"])} ({len(c["queue"])} queued)' if c['arm'] >= 0 else '') + f'; next read: {c["phase"]}'
-            if c['halt'] is not None: s = f'line {c["id"]} halted: {c["halt"]}'
+            if c['halt'] is not None:   # finished: the count of arms here, each arm's ending in the log and in the Picked box when the line is clicked
+                s = f'line {c["id"]} done: {len(c["arms"])} arm(s), {sum(len(a["nodes"]) for a in c["arms"])} nodes, {len(c["joints"])} joint(s) with other lines. Click the line for how its arms ended.' if c['halt'].startswith('done') else f'line {c["id"]} halted: {c["halt"]}'
             elif w.paused: s = f'STOPPED at dot {w.stop_at}, just painted by line {c["id"]} (round {c["round"]}, arm {c["arm"]}); ' + s
             self.lbl_state.setText(s)
         self.busy(False); self.redraw()
@@ -318,23 +351,30 @@ class App(QtWidgets.QMainWindow):
                 w.run(cap)
                 if w.paused: self.logmsg(f'line {w.cur["id"]} stopped at dot {w.stop_at}'); break
                 L = w.lines[-1]
-                self.logmsg(f'line {L["id"]}: seed dot {L["seed"]}, {len(L.get("polylines", []))} arm(s), {len(L["nodes"])} nodes, {len(L.get("junctions", []))} junction(s); {L["halt"][:80]}')
+                self.logmsg(f'line {L["id"]}: seed dot {L["seed"]}, {len(L.get("polylines", []))} arm(s), {len(L["nodes"])} nodes, {len(L.get("joints", []))} joint(s); {L["halt"][:80]}')
                 if (len(w.lines)-n0) % 20 == 0: QtWidgets.QApplication.processEvents()
         finally: w.log = box_log
-        done = w.lines[n0:]; self.logmsg(f'run all lines: {len(done)} lines, {sum(len(L["nodes"]) for L in done)} nodes, {sum(len(L.get("junctions", [])) for L in done)} junctions, {int((w.owner != -1).sum())} of {w.k} dots painted, {time.time()-t0:.1f} s')
+        done = w.lines[n0:]; self.logmsg(f'run all lines: {len(done)} lines, {sum(len(L["nodes"]) for L in done)} nodes, {sum(len(L.get("joints", [])) for L in done)} joints, {int((w.owner != -1).sum())} of {w.k} dots painted, {time.time()-t0:.1f} s')
         self._after()
 
     def reset_walk(self):
         if self.walk is None: return
         self.walk.reset(); self.logmsg('walk reset'); self._after()
     def clear_lines(self):
+        """throws every line away: the one action that cannot be undone short of running everything again, so it asks first"""
         if self.walk is None: return
-        self.walk.clear(); self.logmsg('all lines cleared'); self._after()
+        n = len(self.walk.lines)+(1 if self.walk.cur is not None else 0)
+        ans = QtWidgets.QMessageBox.question(self, 'Clear all lines', f'Throw away all {n} line(s) and free every dot? This cannot be undone.', QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.Cancel, QtWidgets.QMessageBox.Cancel)
+        if ans != QtWidgets.QMessageBox.Yes: self.logmsg('clear all lines: cancelled'); return
+        self.walk.clear(); self.pline = None; self.pnode = None; self.logmsg('all lines cleared'); self._after()
 
     def look_at_seed(self):
-        i = self.walk.cur['seed'] if self.walk is not None and self.walk.cur is not None else self.picked
-        if i is None or self.dots is None: return
-        self._look_at(self._pts(np.array([i]))[0], self.dots['N'][i])
+        """the camera goes to the picked dot, node or line, else to the seed of the walk under way"""
+        if self.dots is None: return
+        if self.picked is not None: self._look_at(self._pts(np.array([self.picked]))[0], self.dots['N'][self.picked]); return
+        if self.pnode is not None: self._look_at(self.pnode[1]); return
+        if self.pline is not None: self._look_at(self.pline[1]); return
+        if self.walk is not None and self.walk.cur is not None: i = self.walk.cur['seed']; self._look_at(self._pts(np.array([i]))[0], self.dots['N'][i])
     def _look_at(self, c, n=None):
         r = self.dots; d = 40*r['size']; n = n if n is not None else self.snap.normals(c)[0] if self.snap is not None else np.array([0, 0, 1.0])
         self.plotter.camera_position = [tuple(c+d*n), tuple(c), (0, 0, 1)]; self.plotter.render()
@@ -346,21 +386,48 @@ class App(QtWidgets.QMainWindow):
 
     # ---- names: a dot by its number in the set, a node by line, arm and number as the log has them ----
     def _node_name(self, line, arm, k):
-        return f'L{line} seed' if arm < 0 else f'L{line} a{arm} start' if k < 0 else f'L{line} a{arm} n{k+1}'
+        return f'L{line} seed' if arm < 0 else f'L{line} a{arm} joint' if k == -2 else f'L{line} a{arm} start' if k < 0 else f'L{line} a{arm} n{k+1}'
+    def _line_name(self, li, nl):
+        """the name of a drawn polyline from its node names: 'L2 a5' for an arm, 'L2 a0 + a1' for the two seed arms drawn as one"""
+        arms = sorted({a for a, k in nl if a >= 0})
+        return f'L{li} ' + ' + '.join(f'a{a}' for a in arms) if arms else f'L{li}'
+    def _show_picked(self, name, key, detail):
+        """the Picked box: the name large, the key reading (strength, or what the line did) bold, the rest small"""
+        self.lbl_name.setText(name); self.lbl_key.setText(key); self.lbl_pick.setText(detail)
     def _select_dot(self, i):
-        r = self.dots; self.picked = int(i); self.pnode = None; c = r['lo']+(r['idx'][i]+0.5)*r['size']
-        extra = ''.join(f', {k} {float(r[k][i]):.2f}' for k in ('spread', 'direction', 'line', 'concentration') if k in r)
-        own = '' if self.walk is None or self.walk.owner[i] == -1 else f', painted by line {self.walk.owner[i]}'
-        s = f'dot {i} (cube {tuple(int(v) for v in r["idx"][i])}): strength {float(r["turn"][i]):.1f}{extra}{own}'
-        self.lbl_pick.setText(s); self.logmsg(f'picked {s}, at {np.round(c, 4).tolist()}'); return c
+        r = self.dots; self.picked = int(i); self.pnode = None; self.pline = None; c = r['lo']+(r['idx'][i]+0.5)*r['size']
+        extra = ', '.join(f'{k} {float(r[k][i]):.2f}' for k in ('spread', 'direction', 'line', 'concentration') if k in r)
+        own = 'free (no line has painted it)' if self.walk is None or self.walk.owner[i] == -1 else f'painted by line {self.walk.owner[i]}'
+        self._show_picked(f'dot {i}', f'strength {float(r["turn"][i]):.1f}', f'{own}\n{extra}\ncube {tuple(int(v) for v in r["idx"][i])}, at {np.round(c, 4).tolist()}')
+        self.logmsg(f'picked dot {i}: strength {float(r["turn"][i]):.1f}, {own}'); return c
     def _select_node(self, name, pos):
-        self.picked = None; self.pnode = (name, np.asarray(pos, float)); self.lbl_pick.setText(f'node {name} at {np.round(pos, 4).tolist()}'); self.logmsg(f'picked node {name} at {np.round(pos, 4).tolist()}'); return self.pnode[1]
+        self.picked = None; self.pline = None; self.pnode = (name, np.asarray(pos, float))
+        self._show_picked(name, 'node', f'at {np.round(pos, 4).tolist()}'); self.logmsg(f'picked node {name} at {np.round(pos, 4).tolist()}'); return self.pnode[1]
+    def _arm_story(self, li, arms):
+        """what the line's arm(s) did, in words, from the walk: node count and how each arm ended"""
+        w = self.walk
+        if w is None: return ''
+        src = None
+        if w.cur is not None and w.cur['id'] == li: src = {a['id']: (len(a['nodes']), a['halt'] or 'under way') for a in w.cur['arms']}
+        else:
+            for L in w.lines:
+                if L['id'] == li: src = {a: (None, h) for a, h in enumerate(L['arms'])}
+        if src is None: return ''
+        out = []
+        for a in arms:
+            n, h = src.get(a, (None, 'unknown'))
+            out.append(f'arm {a}: ' + (f'{n} nodes, ' if n is not None else '') + str(h))
+        return '\n'.join(out)
+    def _select_line(self, name, pts, li, arms, at=None):
+        self.picked = None; self.pnode = None; pts = np.asarray(pts, float); at = pts[len(pts)//2] if at is None else np.asarray(at, float); self.pline = (name, at, pts)
+        story = self._arm_story(li, arms); self._show_picked(name, f'line {li}, {len(pts)} nodes drawn', story)
+        self.logmsg(f'picked line {name}' + (': ' + story.replace('\n', '; ') if story else '')); return at
     def copy_name(self):
-        name = f'dot {self.picked}' if self.picked is not None else self.pnode[0] if self.pnode is not None else None
+        name = f'dot {self.picked}' if self.picked is not None else self.pnode[0] if self.pnode is not None else self.pline[0] if self.pline is not None else None
         if name is None: self.logmsg('nothing picked to copy'); return
         QtWidgets.QApplication.clipboard().setText(name); self.logmsg(f'copied "{name}" to the clipboard')
     def find_named(self):
-        """the Find box: 'dot N' or 'N' selects dot N; 'L2 a5 n7', 'L2 seed', 'L2 a5 start' a node of the lines on screen"""
+        """the Find box: 'dot N' or 'N' selects dot N; 'L2 a5 n7', 'L2 seed', 'L2 a5 start' a node; 'L2 a5' (or 'L2') a line of the lines on screen"""
         if self.dots is None: return
         t = self.ed_find.text().strip().replace('.', ' ').lower(); parts = t.split()
         if not parts: return
@@ -374,7 +441,12 @@ class App(QtWidgets.QMainWindow):
             if kind != 'node': continue
             for q, nm in enumerate(names):
                 if nm.lower() == want: c = self._select_node(nm, pts[q]); self.redraw(); self._pan_to(c); return
-        self.logmsg(f'find: no node named "{t}" on screen (names are like "L2 a5 n7", "L2 seed", "L2 a5 start")')
+        for actor, kind, labels, polys in self.pickables:                       # a line: its full name, or the line number alone (its first drawn arm), or one of its arms
+            if kind != 'line': continue
+            for q, (nm, li, arms) in enumerate(labels):
+                nl = nm.lower(); names_ok = nl == want or want == f'l{li}' or (want.startswith(f'l{li} ') and want.split()[1] in {f'a{a}' for a in arms})
+                if names_ok: c = self._select_line(nm, polys[q], li, arms); self.redraw(); self._pan_to(c); return
+        self.logmsg(f'find: nothing named "{t}" on screen (names are like "dot 53873", "L2 a5 n7", "L2 seed", "L2 a5 start", "L2 a5", "L2")')
 
     # ---- picking ----
     def _on_press(self, *_): self._press = self.plotter.iren.get_event_position()
@@ -382,16 +454,26 @@ class App(QtWidgets.QMainWindow):
         pos = self.plotter.iren.get_event_position()
         if self._press is None or abs(pos[0]-self._press[0]) > 3 or abs(pos[1]-self._press[1]) > 3: return   # a drag rotated the view
         if not self.pickables or self.dots is None: return
-        from vtkmodules.vtkRenderingCore import vtkPointPicker
-        pk = vtkPointPicker(); pk.SetTolerance(self.settings['picktol']); pk.PickFromListOn()
-        for actor, *_ in self.pickables: pk.AddPickList(actor)
-        if not pk.Pick(pos[0], pos[1], 0, self.plotter.renderer) or pk.GetPointId() < 0: return
-        q = int(pk.GetPointId()); hit = pk.GetActor()
-        for actor, kind, names, pts in self.pickables:
-            if actor is not hit: continue
-            if kind == 'dot': self._select_dot(q)
-            else: self._select_node(names[q], pts[q])
-            break
+        from vtkmodules.vtkRenderingCore import vtkPointPicker, vtkCellPicker
+        pk = vtkPointPicker(); pk.SetTolerance(self.settings['picktol']); pk.PickFromListOn()                 # dots and nodes first: points
+        for actor, kind, *_ in self.pickables:
+            if kind != 'line': pk.AddPickList(actor)
+        if pk.Pick(pos[0], pos[1], 0, self.plotter.renderer) and pk.GetPointId() >= 0:
+            q = int(pk.GetPointId()); hit = pk.GetActor()
+            for actor, kind, names, pts in self.pickables:
+                if actor is not hit: continue
+                if kind == 'dot': self._select_dot(q)
+                else: self._select_node(names[q], pts[q])
+                break
+            self.redraw(); return
+        ck = vtkCellPicker(); ck.SetTolerance(self.settings['picktol']); ck.PickFromListOn(); any_line = False   # then the lines: a polyline is one cell
+        for actor, kind, *_ in self.pickables:
+            if kind == 'line': ck.AddPickList(actor); any_line = True
+        if not any_line or not ck.Pick(pos[0], pos[1], 0, self.plotter.renderer) or ck.GetCellId() < 0: return
+        cell = int(ck.GetCellId()); hit = ck.GetActor()
+        for actor, kind, labels, polys in self.pickables:
+            if actor is not hit or kind != 'line' or cell >= len(labels): continue
+            nm, li, arms = labels[cell]; self._select_line(nm, polys[cell], li, arms, at=ck.GetPickPosition()); break
         self.redraw()
 
     # ---- drawing ----
@@ -424,7 +506,10 @@ class App(QtWidgets.QMainWindow):
         cells = np.concatenate([np.r_[k, np.arange(o, o+k)] for k, o in zip(n, off) if k > 1]) if any(k > 1 for k in n) else None
         mf = np.concatenate([np.asarray(m, float) if m is not None and len(m) == k else np.full(k, self.FIT_LO) for m, k in zip(mfs, n)])
         if cells is not None:
-            self.plotter.add_mesh(pv.PolyData(pts, lines=cells), color=color, line_width=width, reset_camera=False)
+            act_l = self.plotter.add_mesh(pv.PolyData(pts, lines=cells), color=color, line_width=width, reset_camera=False)
+            if names is not None and len(names) == len(pls):   # the lines are pickable: one cell per polyline, labelled (name, line, arms), with the unlifted points
+                drawn = [q for q, k in enumerate(n) if k > 1]
+                self.pickables.append((act_l, 'line', [(self._line_name(line[q], names[q]), line[q], sorted({a for a, k in names[q] if a >= 0})) for q in drawn], [pls[q] for q in drawn]))
             if self.chk_top.isChecked() and self.FAINT > 0: self._top(self.plotter.add_mesh(pv.PolyData(pts, lines=cells), color=color, line_width=max(1, width//2), opacity=self.FAINT, reset_camera=False))
         d = pv.PolyData(pts); d['misfit'] = mf
         act = self.plotter.add_mesh(d, scalars='misfit', cmap='coolwarm', clim=(self.FIT_LO, self.FIT_HI), point_size=size, render_points_as_spheres=True, show_scalar_bar=False, reset_camera=False)
@@ -473,15 +558,14 @@ class App(QtWidgets.QMainWindow):
         w = self.walk; big = ds+6; huge = ds+12; cube = 0 if r is None else float(r['size'])
         if w is not None and r is not None:
             owned = np.flatnonzero(w.owner != -1)
-            if len(owned) and self.chk_paint.isChecked(): self._points(self._pts(owned), 'khaki', ds); legend.append(('painted by an earlier line', 'khaki'))
+            if len(owned) and self.chk_paint.isChecked(): self._points(self._pts(owned), 'khaki', ds); legend.append(('dots taken by earlier lines', 'khaki'))
             pls = [pl for L in w.lines for pl in L.get('polylines', [])]; mfs = [mf for L in w.lines for mf in L.get('misfits', [None]*len(L.get('polylines', [])))]
             nms = [nl for L in w.lines for nl in L.get('names', [])]; lids = [L['id'] for L in w.lines for nl in L.get('names', [])]
             show_lines = self.chk_lines.isChecked()
             if show_lines:
                 self._polylines_batch(pls, mfs, 'navy', 4, 6, names=nms if len(nms) == len(pls) else None, line=lids)
-                jf = [pos for L in w.lines for pos, deg, fixed in L.get('junctions', []) if fixed]; jp = [pos for L in w.lines for pos, deg, fixed in L.get('junctions', []) if not fixed]
-                if jf: self._points(jf, 'purple', huge, top=True)
-                if jp: self._points(jp, 'magenta', huge, top=True)
+                jf = [pos for L in w.lines for pos, deg, fixed in L.get('junctions', [])]
+                if jf: self._points(jf, 'purple', huge, top=True); legend.append(('joint: where a line met another and ended', 'purple'))
                 if w.lines: legend.append(('finished lines', 'navy'))
             if self.chk_bands.isChecked() and w.lines:
                 bl = [L['bands'] for L in w.lines if L.get('bands')]
@@ -490,33 +574,29 @@ class App(QtWidgets.QMainWindow):
                     if len(g): self._points(self._pts(g), col, size, top=(key == 'valleys')); legend.append((f'{tip} ({len(g)} dots)', col))
             st = w.state()
             if st is not None:
-                if self.chk_paint.isChecked(): self._points(self._pts(st['painted']), 'tan', ds+1); legend.append(("this line's paint", 'tan'))
-                self._points(self._pts(st['front']), 'white', big); legend.append(('the front (painted last round)', 'white'))
+                if self.chk_paint.isChecked(): self._points(self._pts(st['painted']), 'tan', ds+1); legend.append(('dots this line has taken so far', 'tan'))
+                self._points(self._pts(st['front']), 'white', big); legend.append(('the front: the dots taken in the last round, where the walk grows from', 'white'))
                 if self.chk_bands.isChecked():
                     b = st['bands']
                     if len(b['aside']): self._points(self._pts(b['aside']), 'cyan', big); legend.append((f'past a valley, let go by this line ({len(b["aside"])} dots): free for another line', 'cyan'))
                     if len(b['valleys']): self._points(self._pts(b['valleys']), 'orangered', big+2, top=True); legend.append((f'valley dots of the trimmed rows ({len(b["valleys"])})', 'orangered'))
-                if st['probe'] is not None:
-                    for q, (g, live) in enumerate(zip(st['probe']['halves'], st['probe']['live'])):
-                        col = walkmod.CLUMP_COLOURS[q % len(walkmod.CLUMP_COLOURS)]; self._points(self._pts(g), col, big); legend.append((f'split under test, half {q} ({len(g)} dots{", dead" if not live else ""}), round {st["probe"]["rounds"]} of {self.walk.window}', col))
-                elif st['clumps']:
+                if len(st['foreign']): self._points(self._pts(st['foreign']), 'magenta', big); legend.append((f'dots of another line touched this round ({len(st["foreign"])}): a joint is tested', 'magenta'))
+                if st['clumps']:
                     for q, g in enumerate(st['clumps']):
-                        col = walkmod.CLUMP_COLOURS[q % len(walkmod.CLUMP_COLOURS)]; self._points(self._pts(g), col, big); legend.append((f'new dots, clump {q} ({len(g)})', col))
-                elif len(st['new']): self._points(self._pts(st['new']), 'yellow', big); legend.append((f'new dots, not yet clumped ({len(st["new"])})', 'yellow'))
+                        col = walkmod.CLUMP_COLOURS[q % len(walkmod.CLUMP_COLOURS)]; self._points(self._pts(g), col, big); legend.append((f'taken this round, group {q} ({len(g)} dots): dots next door to the front', col))
+                elif len(st['new']): self._points(self._pts(st['new']), 'yellow', big); legend.append((f'taken this round, not yet grouped ({len(st["new"])} dots)', 'yellow'))
                 seedp = self._pts(np.array([st['seed']]))[0]; self._points([seedp], 'red', huge, top=True); legend.append(('seed', 'red'))
                 if show_lines:
                     self._polylines_batch(st['polylines'], st['misfits'], 'blue', 5, big, names=st['names'] if len(st['names']) == len(st['polylines']) else None, line=[st['id']]*len(st['polylines']))
-                    legend.append(('nodes: blue where the arrows fit one line (a crease), red where they do not (a fork)', 'blue'))
-                    jf = [pos for pos, fixed in st['junctions'] if fixed]; jp = [pos for pos, fixed in st['junctions'] if not fixed]
-                    if jf: self._points(jf, 'purple', huge, top=True)
-                    if jp: self._points(jp, 'magenta', huge, top=True)
-                    if st['junctions']: legend.append(('junction, provisional', 'magenta')); legend.append(('junction, corrected', 'purple'))
+                    legend.append(('nodes: blue where the arrows around fit one line (a crease), red where they do not', 'blue'))
+                    jf = [pos for pos, fixed in st['junctions']]
+                    if jf: self._points(jf, 'purple', huge, top=True); legend.append(('joint: where this line met another and ended', 'purple'))
                     if st['newest'] is not None: self._points([st['newest']], 'blue', huge+4, top=True)
                 # the direction: at the finding stage from the seed to each clump; while advancing, from the newest node (or the seed) toward the front
                 if len(st['region']):
                     m = st['member'] if st['member'] is not None else np.ones(len(st['region'])); sec = st['second'] if st['second'] is not None else np.zeros(len(st['region']), bool)
                     own = st['region'][(m >= 0.1) & ~sec]; odd = st['region'][m < 0.1]; lead2 = st['region'][(m >= 0.1) & sec]
-                    self._points(self._pts(own), 'lightgreen', ds+2); legend.append((f'node window: the rows read ({len(own)} dots)', 'lightgreen'))
+                    self._points(self._pts(own), 'lightgreen', ds+2); legend.append((f'the rows a node is read from ({len(own)} dots)', 'lightgreen'))
                     if len(lead2): self._points(self._pts(lead2), 'hotpink', ds+4); legend.append((f'second lead in the band ({len(lead2)} dots): climb {st["climb"]:.2f} of the crest' + (f', arm mean {st["climb_mean"]:.2f}' if st['climb_mean'] is not None else ''), 'hotpink'))
                     elif st['climb'] is not None: legend.append((f'one lead: climb {st["climb"]:.2f} of the crest' + (f', arm mean {st["climb_mean"]:.2f}' if st['climb_mean'] is not None else ''), 'lightgreen'))
                     if len(odd): self._points(self._pts(odd), 'salmon', ds+2); legend.append((f'dots of another band, arrows off this direction ({len(odd)})', 'salmon'))
@@ -524,15 +604,22 @@ class App(QtWidgets.QMainWindow):
                     tail = st['rownode'][0] if st['rownode'] is not None else (st['newest'] if st['newest'] is not None else seedp)
                     self._arrow(tail, st['direction'], 'darkgreen', 8*cube); legend.append((f'crease direction: the arrows fit one line within {st["misfit"] if st["misfit"] is not None else 0:.0f} deg' + (f'; own row off the stem by {st["share"]:.0f} deg' if st['share'] is not None else ''), 'darkgreen'))
                 if st['rownode'] is not None:
-                    cr, cg = st['rownode']; self._points([cr], 'yellow', big, top=True); self._points([cg], 'lightgreen', big+2, top=True); legend.append(("the row's centre (along)", 'yellow')); legend.append(("the window's centre (across)", 'lightgreen'))
+                    cr, cg = st['rownode']; self._points([cr], 'yellow', big, top=True); self._points([cg], 'lightgreen', big+2, top=True); legend.append(("centre of the node's own row", 'yellow')); legend.append(('centre of the rows around it', 'lightgreen'))
         if self.picked is not None and r is not None: self._points(self._pts(np.array([self.picked])), 'lime', huge, top=True); legend.append((f'picked dot {self.picked}', 'lime'))
         if self.pnode is not None: self._points([self.pnode[1]], 'lime', huge+4, top=True); legend.append((f'picked node {self.pnode[0]}', 'lime'))
+        if self.pline is not None and w is not None: self._polyline(self.pline[2], 'lime', 9); self._points([self.pline[1]], 'lime', huge, top=True); legend.append((f'picked line {self.pline[0]}', 'lime'))
         if w is not None and r is not None and self.chk_top.isChecked(): legend.append(('faint: hidden behind geometry', 'grey'))
-        if legend and self.chk_legend.isChecked(): self.plotter.add_legend(legend, bcolor='white', border=True, size=(0.28, 0.02*len(legend)+0.02), loc='upper left', face='circle')
+        self._legend(legend if self.chk_legend.isChecked() else [])
         if reset: self.plotter.reset_camera()
         else: self.plotter.camera_position = cam
         self.plotter.render()
 
+    def _legend(self, entries):
+        """the legend lives in the side panel (a viewport overlay scaled its text away and coloured it unreadably): a coloured
+        dot and white text per entry, on a dark strip so the light colours show"""
+        import html
+        if not entries: self.lbl_legend.setText('<i>nothing drawn yet</i>' if self.chk_legend.isChecked() else '<i>legend off</i>'); return
+        self.lbl_legend.setText('<br>'.join(f'<span style="color:{c}; font-size:20px;">&#9679;</span>&nbsp;<b>{COLOUR_WORDS.get(c, c)}</b>: {html.escape(t)}' for t, c in entries))
     def dump(self):
         d = os.path.join(DEBUG_DIR, time.strftime('%Y%m%d_%H%M%S')); os.makedirs(d, exist_ok=True)
         try:
