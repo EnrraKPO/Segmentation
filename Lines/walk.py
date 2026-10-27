@@ -106,6 +106,16 @@ opens when row k and the window rows ahead all have an other piece on the same s
 lane takes is consumed, so a later lane cannot take it again. A row's other pieces on a side with no lane stay painted
 but noded by nobody. First run: the brow arm opens its lane at row 5 (rises 1.0, 1.0, 0.3, 1.0), the convex crease is
 an arm of its own from there; line 1 has 4 lane arms (4-7 nodes) instead of four one-row ones.
+Replaced the same night, later still (the user: "any row, at any time, that spots a valley counts only the dots up to the
+point the tendency shifts; anything past it ceases to exist"): the node-time cut left the front whole, so the paint kept
+growing from the far side of a valley; on line 1 it leaked sideways onto a neighbouring stripe near arm 7's end, crept
+along it, and when it parted the parting rule made it a branch from a node 8 cubes away. Now the trim is done the
+moment a row is painted (_trim, in _spread, for the main front and for every half of a split under test): the row keeps
+the dots up to the valley, the rest are unpainted again and out of everything this line does. A dip that does not
+repeat costs nothing, the next round grows back over them by touch. The lanes, the node-time cut and the window
+confirmation are gone with it: the other band is simply free for another line. First run: line 1 goes 36 -> 177 arms,
+749 -> 6011 nodes, 4.9k -> 38.9k dots painted, with no retracing (its long arms walk new ground: the line was being
+choked by its own leaked paint before). The leak near arm 7 is let go (dots 41385, 41390 free again).
 
 Leads (agreed 2026-10-25, last; measured only, nothing acts on it yet): across a crease, from the crest outward, strength
 only falls or holds; a rise after a fall is a second lead, a second crease in the same band (a split before the dots
@@ -164,6 +174,7 @@ class Walk:
         self.owner = np.full(self.k, -1, np.int32); self.lines = []; self.snap = snap or (lambda p, n: p); self.log = log or (lambda s: None); self.cap = int(cap)
         self.gap = float(gap); self.fork = float(fork); self.kink = float(kink); self.lead = float(lead); self._tree = None; self._sub = np.full(self.k, -1, np.int32)   # gap radius (mm); the dot tree for it, built when first needed; the half each dot was painted by during a split test
         self.cur = None   # the walk under way
+        self.stop_at = None; self.paused = False   # a breakpoint: the dot the walk pauses at, the moment a read paints it (once per line); `paused` is set by that read and cleared by the next step
 
     @property
     def tree(self):
@@ -196,27 +207,30 @@ class Walk:
         elif ph == 'clump': self._clump(); c['phase'] = 'node' if c['stage'] == 'find' or c['probe'] is not None else 'direction'
         elif ph == 'direction': self._direction(); c['phase'] = 'node'
         elif ph == 'node': self._node(); c['phase'] = 'spread'
+        if self.stop_at is not None and c.get('break_hit') != self.stop_at and self.owner[self.stop_at] == c['id']:
+            c['break_hit'] = self.stop_at; self.paused = True; self.log(f'*** stopped: dot {self.stop_at} was just painted by line {c["id"]} ({ph} read, round {c["round"]}, arm {c["arm"]})')
         return ph
 
     def step_node(self):
         """reads until a node read is done (or the walk halts)"""
         c = self.cur
         if c is None or c['halt'] is not None: return
+        self.paused = False
         while True:
             ph = self.step_read()
-            if ph == 'node' or ph is None or c['halt'] is not None: return
+            if ph == 'node' or ph is None or c['halt'] is not None or self.paused: return
 
     def run(self, max_nodes=100000):
         """to the end of the walk"""
-        c = self.cur; n = 0
-        while c is not None and c['halt'] is None and n < max_nodes: self.step_node(); n += 1
+        c = self.cur; n = 0; self.paused = False
+        while c is not None and c['halt'] is None and n < max_nodes and not self.paused: self.step_node(); n += 1
 
     def run_arm(self, max_nodes=100000):
         """to the next halt: the arm under way halts (its end, a junction, a collision), or a split comes under test"""
-        c = self.cur; n = 0; arm = c['arm']; probing = c['probe'] is not None
+        c = self.cur; n = 0; arm = c['arm']; probing = c['probe'] is not None; self.paused = False
         while c['halt'] is None and n < max_nodes:
             self.step_node(); n += 1
-            if c['arm'] != arm or (c['probe'] is not None and not probing): return
+            if self.paused or c['arm'] != arm or (c['probe'] is not None and not probing): return
             probing = c['probe'] is not None
 
     # ---- the paint ----
@@ -234,9 +248,14 @@ class Walk:
         centre = self.X[front].mean(0); ahead = (self.X[cand]-centre) @ heading > 0; return cand[ahead]
 
     def _paint_from(self, front, heading=None):
-        """the next row from a front: the unpainted dots next door; at a dead end the gap is sought ahead. Returns new, foreign, gapped"""
+        """the next row from a front: the unpainted dots next door that lie past the front in the direction of the walk (agreed
+        2026-10-27: a dot behind the front's strength-weighted centre along the heading is not grabbed, it stays free); at a dead
+        end the gap is sought ahead. Returns new, foreign, gapped"""
         c = self.cur; tid = c['id']; cand = self.nb[front]; cand = cand[cand >= 0]; cand = np.unique(cand)
         foreign = cand[(self.owner[cand] != -1) & (self.owner[cand] != tid)]; new = cand[self.owner[cand] == -1]; gapped = False
+        if heading is not None and len(new):
+            ahead = (self.X[new]-self._centre(front)) @ heading > 0
+            if not ahead.all(): self.log(f'  {int((~ahead).sum())} touching dot(s) behind the front left free'); new = new[ahead]
         if len(new) == 0 and len(foreign) == 0 and heading is not None:
             new = self._gap_seek(front, heading); gapped = len(new) > 0
         self.owner[new] = tid; return new, foreign, gapped
@@ -248,6 +267,7 @@ class Walk:
             for i, sub in enumerate(pr['subs']):
                 if sub['dead']: continue
                 new, fo, gapped = self._paint_from(sub['front'], self._heading(c['arms'][c['arm']], sub['front'])); foreign.append(fo)
+                new = self._trim(c['arms'][c['arm']], new, sub['rows'][-1])
                 if len(new) == 0: sub['dead'] = True; sub['new'] = np.zeros(0, int); self.log(f'  half {i}: nothing ahead, a stub'); continue
                 self._sub[new] = i; sub['new'] = new; sub['rows'].append(new); news.append(new)
                 if gapped: c['gapped'] += 1; self.log(f'  half {i}: dead end, {len(new)} dots found within {self.gap:g} mm ahead')
@@ -257,6 +277,7 @@ class Walk:
             return
         heading = self._heading(c['arms'][c['arm']], c['front']) if c['stage'] == 'advance' else None
         new, foreign, gapped = self._paint_from(c['front'], heading)
+        if c['stage'] == 'advance': new = self._trim(c['arms'][c['arm']], new, c['front'])
         c['new'] = new; c['foreign'] = foreign
         if gapped: c['gapped'] += 1
         c['records'].append(dict(round=c['round'], stage=c['stage'], arm=c['arm'], read='spread', front=len(c['front']), new=len(new), foreign=len(foreign), gapped=gapped))
@@ -279,7 +300,6 @@ class Walk:
     def _start_probe(self, clumps):
         """a split: every clump becomes a half with its own front, painted on for up to `window` rounds"""
         c = self.cur
-        if c['arms'][c['arm']].get('lane') is not None: self._close_lane(c['arms'][c['arm']], 'a split comes under test')
         c['probe'] = dict(subs=[dict(front=g, new=g, rows=[g], dead=False) for g in clumps], rounds=0)
         for i, g in enumerate(clumps): self._sub[g] = i
         self.log(f'split into {len(clumps)} halves {[len(g) for g in clumps]}: under test for {self.window} rounds (a hole rejoins, a stub dies, a junction stays apart)')
@@ -348,7 +368,7 @@ class Walk:
         rows = arm['rows']; before = arm['before']; W = self.window; parts = []; dropped = []
         for j in range(k-W, k+W+1):
             if 0 <= j < len(rows):
-                rj = self._cut_row(arm, j)[0]
+                rj = rows[j]
                 if drop_faulty and j > k and arm['heading'] is not None and self.row_misfit(rj, arm['heading']) > self.fork: dropped.append(j); continue
                 parts.append(rj)
             elif j < 0 and -j <= len(before): parts.append(before[len(before)+j])   # j = -1 is the row just before the arm's first
@@ -386,7 +406,6 @@ class Walk:
         return (best/prof[top] if prof[top] > 0 else 0.0), second, prof
 
     def _direction_at(self, arm, k):
-        self._decide(arm, k)
         c = self.cur; g_all = self._rows_region(arm, k); g, dropped = self._rows_region(arm, k, drop_faulty=True); c['region'] = g; c['dropped'] = dropped
         if len(g) == 0: g = g_all; c['region'] = g
         ref = arm['heading'] if arm['heading'] is not None else (self.X[arm['rows'][0]].mean(0)-arm['start'])   # sign: the way the arm goes, away from where it started
@@ -402,7 +421,7 @@ class Walk:
     def _place(self, arm, k, check=True):
         """the node of row k: the region's centre across, the row's centre along, onto the surface. check: the trend break is
         watched (not while an arm is flushed at its halt, where the rows end anyway)"""
-        c = self.cur; g = c['region']; t = c['direction']; row = self._cut_row(arm, k)[0]
+        c = self.cur; g = c['region']; t = c['direction']; row = arm['rows'][k]
         rm = self.row_misfit(row, arm['heading']) if arm['heading'] is not None else 0.0; c['share'] = rm
         ahead = [j for j in range(k+1, min(len(arm['rows']), k+self.window+1))]; none_valid = len(ahead) > 0 and all(j in c['dropped'] for j in ahead)   # rows ahead exist and every one was faulty
         if check and arm['heading'] is not None and (rm > self.fork or none_valid): self._trend_break(arm, k, rm, none_valid); return True
@@ -412,10 +431,6 @@ class Walk:
         arm['fit_sum'] += float((self.w[row]*(self.N[row] @ t)**2).sum()); arm['fit_w'] += float(self.w[row].sum())   # the band's scatter: every dot of the row, strength-weighted (weighing by membership shrank it on itself: 0.7 deg, a third of the band cut, a staircase)
         p = cg+((cr-cg) @ t)*t; q = self.snap(p, ng); mv = float(np.linalg.norm(q-p))
         arm['nodes'].append(q); arm['misfits'].append(c['misfit']); arm['heading'] = t; arm['k'] = k+1; c['rownode'] = (cr, cg)
-        for J in c['junctions']:                                              # a lane's junction sits on this arm's node of its row, once that node is placed
-            if J.get('stem') == arm['id'] and J['row'] == k and not J['fixed']:
-                J['pos'] = q.copy(); J['provisional'] = q.copy()
-                for i in J['arms']: c['arms'][i]['start'] = q.copy()
         c['records'].append(dict(round=c['round'], stage='advance', arm=c['arm'], read='node', row=k, node=[float(v) for v in q], moved=mv, dots=len(row), region=len(g), sureness=c['sure']))
         self.log(f'node {len(arm["nodes"])} of arm {c["arm"]} (row {k}, {len(row)} dots): {self._fmt(q)}; across from {len(g)} dots, along from the row, snap moved {mv*1000:.1f} um; own row off the stem by {rm:.0f} deg')
         if len(arm['nodes']) == 1 and arm['junction'] is not None: self._check_loose(arm); self._try_fix(arm['junction'])
@@ -426,7 +441,7 @@ class Walk:
         c = self.cur; J = c['junctions'][arm['junction']]; d = arm['nodes'][0]-J['pos']; L = float(np.linalg.norm(d))
         if L < 1e-12: return
         d /= L; offs = {}
-        stem = c['arms'][J['arm_in']]['heading'] if J['arm_in'] is not None else J.get('heading')
+        stem = c['arms'][J['arm_in']]['heading'] if J['arm_in'] is not None else None
         if stem is not None: offs['stem'] = float(np.degrees(np.arccos(min(1.0, abs(d @ stem)))))
         offs['own'] = float(np.degrees(np.arccos(min(1.0, abs(d @ arm['heading'])))))
         off = min(offs.values()); loose = off > self.kink
@@ -454,7 +469,6 @@ class Walk:
             return
         if c['probe'] is not None: self._probe_decide(); return
         arm = c['arms'][c['arm']]
-        if n >= 2 and arm.get('lane') is not None: cl = self._lane_parts(arm, cl); n = len(cl)   # the paint came apart: the lane's clump goes with the lane
         if n == 1:
             arm['rows'].append(cl[0]); c['prev'] = c['front']; c['front'] = cl[0]; c['round'] += 1
             if c['direction'] is not None:
@@ -464,7 +478,7 @@ class Walk:
         elif n == 0: self._arm_halt('the dots end' if not self._touches_own(c) else 'the paint came round onto its own line')
         else: self._start_probe(cl)
 
-    # ---- sub-bands ----
+    # ---- sub-bands: the trim ----
     def _across(self, row, t):
         """the across axis of a row: a = n x t, n the row's strength-weighted arrow"""
         n = (self.N[row]*self.w[row, None]).sum(0); a = np.cross(n/(np.linalg.norm(n)+1e-12), t); return a/(np.linalg.norm(a)+1e-12)
@@ -472,107 +486,47 @@ class Walk:
     def _centre(self, g):
         wl = self.w[g]/max(self.w[g].sum(), 1e-12); return (self.X[g]*wl[:, None]).sum(0)
 
-    def _reference(self, arm, j):
-        """the point row j is read from: the strength-weighted centre of our piece of the row before it (for the arm's first row:
-        the row before the arm, or the point the arm starts from)"""
-        if j > 0:
-            own = self._cut_row(arm, j-1)[0]; return self._centre(own) if len(own) else self._reference(arm, j-1)
-        return self._centre(arm['before'][-1]) if arm['before'] and len(arm['before'][-1]) else arm['start']
-
-    def _cut_row(self, arm, j):
-        """row j cut at its valleys, once, the first time it is asked for with a heading in hand (every row is cut, always; the
-        cut never moves afterwards). Read across in bins one cube wide (each bin its strongest dot, every dot at full strength),
-        a valley is a run of bins lower than the runs on both sides, its rise past the valley over `lead` of the lower neighbouring
-        crest. Our piece is the one holding the reference (our piece of the row before, see _reference), the valley bins with it;
-        the pieces beyond a valley are the other side's. While a lane is open and the row shows no valley on its side, the row is
-        cut at the lane's last valley. Returns (our dots, {side: other dots}, {side: valley position, cubes from the reference},
-        {side: the rise as a share of the lower crest})"""
-        cut = arm['cut']
-        while len(cut) <= j: cut.append(None)
-        if cut[j] is not None: return cut[j]
-        row = arm['rows'][j]; t = arm['heading']
-        if t is None or len(row) < 2: return row, {}, {}, {}
-        origin = self._reference(arm, j); a = self._across(row, t)
-        sx = (self.X[row]-origin) @ a/self.size; b = np.rint(sx).astype(int); lo = b.min(); b -= lo
+    def _trim(self, arm, row, prev):
+        """a freshly painted row keeps only the dots up to the valley (agreed 2026-10-26, late): read across in bins one cube
+        wide (each bin its strongest dot, every dot at full strength), a valley is a run of bins lower than the runs on both
+        sides, its rise past the valley over `lead` of the lower neighbouring crest. Our piece is the one holding the reference,
+        the strength-weighted centre of the row before (`prev`; the row before the arm, or its start, for the first row), the
+        valley bins with it. The dots past a valley cease to exist for this line: unpainted again, out of the row, the front,
+        the clumps and everything after. A dip that does not repeat costs nothing: the next round grows back over them by
+        touch. Returns the trimmed row. No heading yet (an arm's first rows): the row stays whole."""
+        t = arm['heading']; j = len(arm['rows'])
+        if t is None or len(row) < 2: return row
+        origin = self._centre(prev) if prev is not None and len(prev) else (self._centre(arm['before'][-1]) if arm['before'] and len(arm['before'][-1]) else arm['start'])
+        a = self._across(row, t); sx = (self.X[row]-origin) @ a/self.size; b = np.rint(sx).astype(int); lo = b.min(); b -= lo
         prof = np.zeros(b.max()+1); np.maximum.at(prof, b, self.w[row])
         runs = []                                                             # (first bin, last bin, strength) of each run of equal bins
         for i, v in enumerate(prof):
             if runs and runs[-1][2] == v: runs[-1][1] = i
             else: runs.append([i, i, float(v)])
-        cand = [r for r in range(1, len(runs)-1) if runs[r][2] < runs[r-1][2] and runs[r][2] < runs[r+1][2]]
         valleys = []
-        for r in cand:
-            left = max(x[2] for x in runs[:r]); right = max(x[2] for x in runs[r+1:])
-            v = runs[r][2]; rise = min(left, right)-v
-            if rise > self.lead*min(left, right): valleys.append((runs[r][0], runs[r][1], (runs[r][0]+runs[r][1])/2+lo, rise/max(min(left, right), 1e-12)))
+        for r in range(1, len(runs)-1):
+            if not (runs[r][2] < runs[r-1][2] and runs[r][2] < runs[r+1][2]): continue
+            left = max(x[2] for x in runs[:r]); right = max(x[2] for x in runs[r+1:]); v = runs[r][2]; rise = min(left, right)-v
+            if rise > self.lead*min(left, right): valleys.append((runs[r][0], runs[r][1], rise/max(min(left, right), 1e-12)))
+        if not valleys: return row
         b0 = int(np.clip(-lo, 0, len(prof)-1))                               # the bin the reference falls in
         L = [v for v in valleys if v[1] < b0]; R = [v for v in valleys if v[0] > b0]
-        other, where, climb = {}, {}, {}
-        if L: v = L[-1]; other[-1] = row[b < v[0]]; where[-1] = v[2]; climb[-1] = v[3]
-        if R: v = R[0]; other[1] = row[b > v[1]]; where[1] = v[2]; climb[1] = v[3]
-        mask = np.ones(len(row), bool)
-        for sd in other: mask &= ~np.isin(row, other[sd])
-        lane = arm['lane']
-        if lane is not None and lane['side'] not in other and lane['valley'] is not None:   # the lane's row shows no valley of its own: cut where the lane last was
-            sd = lane['side']; beyond = mask & ((sx > lane['valley']) if sd == 1 else (sx < lane['valley']))
-            if beyond.any() and not beyond.all(): other[sd] = row[beyond]; where[sd] = lane['valley']; climb[sd] = 0.0; mask &= ~beyond
-        cut[j] = (row[mask], other, where, climb)
-        if other:
-            self.cur['records'].append(dict(round=self.cur['round'], stage='advance', arm=arm['id'], read='cut', row=j, own=int(mask.sum()), other={int(k): int(len(v)) for k, v in other.items()}, valley={int(k): float(v) for k, v in where.items()}, climb={int(k): round(float(v), 3) for k, v in climb.items()}, profile=[int(v) for v in prof]))
-        return cut[j]
+        keep = np.ones(len(row), bool); vmask = np.zeros(len(row), bool); gone = {}
+        if L: v = L[-1]; keep &= b >= v[0]; vmask |= (b >= v[0]) & (b <= v[1]); gone[-1] = (int((b < v[0]).sum()), round(v[2], 2))
+        if R: v = R[0]; keep &= b <= v[1]; vmask |= (b >= v[0]) & (b <= v[1]); gone[1] = (int((b > v[1]).sum()), round(v[2], 2))
+        if not gone or keep.all() or not keep.any(): return row
+        far = row[~keep]; self.owner[far] = -1; arm['aside'].append(far); arm['valleys'][j] = row[vmask]
+        self.cur['records'].append(dict(round=self.cur['round'], stage='advance', arm=arm['id'], read='trim', row=j, kept=int(keep.sum()), gone={int(k): v for k, v in gone.items()}, profile=[int(v) for v in prof]))
+        self.log(f'trim: row {j} of arm {arm["id"]} keeps {int(keep.sum())} of {len(row)} dots: ' + ', '.join(f'{n} past a valley on the {"right" if sd == 1 else "left"} (rise {rs:g} of the crest)' for sd, (n, rs) in gone.items()) + ' let go')
+        return row[keep]
 
-    def _decide(self, arm, k):
-        """row k is about to be noded, the window rows ahead of it painted and cut: a side whose other piece is there in row k and
-        in every row ahead opens the lane (a junction on the arm's node of row k-1, carrying the stem's heading there); the
-        lane closes when no row of the window shows an other piece on its side. While open the other piece of row k goes to the
-        lane. With fewer rows ahead the lane stays as it is."""
-        c = self.cur; rows = arm['rows']; lane = arm['lane']; t = arm['heading']
-        if t is None or k >= len(rows): return
-        reads = [self._cut_row(arm, j) for j in range(k, min(len(rows), k+self.window+1))]; full = len(reads) == self.window+1
-        if lane is None:
-            sides = [sd for sd in (1, -1) if full and all(sd in r[1] for r in reads)]
-            if not sides: return
-            sd = max(sides, key=lambda sd: sum(r[3][sd] for r in reads))
-            q = arm['nodes'][k-1] if len(arm['nodes']) > k-1 else arm['start']; jid = self._new_junction(q, None); J = c['junctions'][jid]
-            J['stem'] = arm['id']; J['row'] = k-1; J['heading'] = t.copy(); lane = arm['lane'] = dict(rows=[], junction=jid, climbs=[], side=sd, valley=reads[0][2][sd], first=k)
-            self.log(f'row {k} of arm {arm["id"]}: a second crest on the {"right" if sd == 1 else "left"} in it and the {self.window} rows ahead (rises {[round(r[3][sd], 2) for r in reads]}): a second band under the same paint; junction {jid} opened on the node of row {k-1}')
-        else:
-            sd = lane['side']
-            if full and not any(sd in r[1] for r in reads): self._close_lane(arm, f'one crest in row {k} and the {self.window} rows ahead', upto=k); return
-        own, other, where, climb = reads[0]
-        if sd in other: lane['rows'].append(other.pop(sd)); lane['climbs'].append(climb[sd]); lane['valley'] = where[sd]   # taken: the piece is the lane's now, no later lane can take it again
-        c['records'].append(dict(round=c['round'], stage='advance', arm=c['arm'], read='lane', row=k, own=int(len(own)), other=int(len(other.get(sd, ()))), valley=where.get(sd)))
-
-    def _divide_ahead(self, arm, upto=None):
-        """the rows painted ahead of the last noded row give the lane their other piece on its side; `upto`: the rows from this one on stay"""
-        k = arm['k']-1; rows = arm['rows']; lane = arm['lane']
-        for j in range(k+1, len(rows) if upto is None else upto):
-            other = self._cut_row(arm, j)[1]
-            if lane['side'] in other: lane['rows'].append(other.pop(lane['side']))
-
-    def _close_lane(self, arm, why, extra=None, upto=None):
-        """the lane becomes an arm of its own from its junction, with its rows (and the rows of its clump once the paint came apart)"""
-        c = self.cur; lane = arm['lane']
-        if arm['k'] >= 1: self._divide_ahead(arm, upto)
-        arm['lane'] = None; rows_l = list(lane['rows'])+(list(extra) if extra else [])
-        if not rows_l: self.log(f'arm {arm["id"]}: the second band had no rows: {why}'); return None
-        a = self._new_arm(rows_l, c['junctions'][lane['junction']]['pos'], [], lane['junction'])
-        self.log(f'arm {arm["id"]}: the second band (from row {lane["first"]}, {len(rows_l)} rows, rises {[round(v, 2) for v in lane["climbs"]]}) is arm {a["id"]} from junction {lane["junction"]}: {why}')
-        return a
-
-    def _lane_parts(self, arm, clumps):
-        """the paint came apart while a lane is open: a clump touching the lane's dots more than the arm's own goes with the lane.
-        One clump each way: the lane closes as an arm with its clump and the arm goes on with the other; else the lane closes with
-        what it has and every clump is tested as a split"""
-        lane = arm['lane']; rows = arm['rows']
-        if arm['k'] >= 1: self._divide_ahead(arm)
-        L = set(np.concatenate(lane['rows']).tolist()) if lane['rows'] else set(); M = set(np.concatenate(rows[-2:]).tolist()); mine, theirs = [], []
-        for g in clumps:
-            nb = self.nb[g]; nb = nb[nb >= 0].tolist(); nl = sum(1 for j in nb if j in L); nm = sum(1 for j in nb if j in M)
-            (theirs if nl > nm else mine).append(g)
-        if len(mine) == 1 and len(theirs) == 1:
-            self._close_lane(arm, f'the paint came apart at row {len(rows)}', extra=[theirs[0]]); return mine
-        self._close_lane(arm, f'the paint came apart into {len(clumps)} clumps at row {len(rows)}, {len(theirs)} on the lane side'); return clumps
+    def bands(self, arms):
+        """the trims of a line's arms, for the view: valley dots, and the dots let go that no line has taken since"""
+        val = [v for a in arms for v in a['valleys'].values() if len(v)]
+        aside = [g for a in arms for g in a['aside'] if len(g)]
+        cat = lambda L: np.unique(np.concatenate(L)) if L else np.zeros(0, int)
+        aside = cat(aside); aside = aside[self.owner[aside] == -1]
+        return dict(valleys=cat(val), aside=aside)
 
     def _seed_node(self):
         """the seed's node: the seed moved across onto the centre of its rings, pushed onto the surface"""
@@ -589,9 +543,8 @@ class Walk:
         """the stem is cut at row k: the arm ends at its last node (the anchor); the branches open from it"""
         c = self.cur; why = f'the stem is cut at row {k}: ' + (f'no valid row ahead of it (every row ahead is faulty)' if none_valid and share <= self.fork else f'its arrows are {share:.0f} deg off the stem')
         arm['halt'] = why; self.log(f'arm {arm["id"]} halts: {why}')
-        if arm.get('lane') is not None: self._close_lane(arm, 'the stem is cut')
         q = arm['nodes'][-1] if arm['nodes'] else arm['start']; jid = self._new_junction(q, arm['id']); arm['end_junction'] = jid
-        rest = arm['rows'][k:]; arm['rows'] = arm['rows'][:k]; arm['cut'] = arm['cut'][:k]; arm['k'] = len(arm['rows']); pending = arm.get('pending'); arm['pending'] = None
+        rest = arm['rows'][k:]; arm['rows'] = arm['rows'][:k]; arm['k'] = len(arm['rows']); pending = arm.get('pending'); arm['pending'] = None
         if pending is not None:                                                # the paint has already found the branches: they open from the anchor; the fork rows between stay painted, unnoded
             for g in pending: self._new_arm(g, q, [], jid)
             self.log(f'junction {jid} at {self._fmt(q)}: {len(pending)} arms open from it, {len(rest)} fork row(s) left unnoded')
@@ -607,7 +560,7 @@ class Walk:
     def _new_arm(self, rows, start, before, junction):
         """an arm: its first row (or rows), the point it starts from, the rows before it (nearest last), the junction it leaves (or None)"""
         rows = list(rows) if isinstance(rows, list) else [rows]
-        c = self.cur; a = dict(id=len(c['arms']), rows=rows, before=list(before), nodes=[], halt=None, heading=None, k=0, start=np.asarray(start, float), junction=junction, loose=False, lane=None, cut=[], end_junction=None, fit_sum=0.0, fit_w=0.0, share_sum=0.0, share_n=0, climb_sum=0.0, climb_n=0, misfits=[])   # before: the rows before the arm's first (the seed rings for the seed arms, nothing for a branch)
+        c = self.cur; a = dict(id=len(c['arms']), rows=rows, before=list(before), nodes=[], halt=None, heading=None, k=0, start=np.asarray(start, float), junction=junction, loose=False, valleys={}, aside=[], end_junction=None, fit_sum=0.0, fit_w=0.0, share_sum=0.0, share_n=0, climb_sum=0.0, climb_n=0, misfits=[])   # before: the rows before the arm's first (the seed rings for the seed arms, nothing for a branch)
         c['arms'].append(a); c['queue'].append(a['id'])
         if junction is not None: c['junctions'][junction]['arms'].append(a['id'])
         return a
@@ -631,7 +584,6 @@ class Walk:
 
     def _arm_halt(self, why, branches=None):
         c = self.cur; arm = c['arms'][c['arm']]; arm['halt'] = why; self.log(f'arm {c["arm"]} halts: {why}')
-        if arm.get('lane') is not None: self._close_lane(arm, 'the arm halts')
         arm['pending'] = branches; c['broken'] = False
         while arm['k'] < len(arm['rows']):                                   # the rows the paint ran ahead over still get their nodes, with the rows there are
             self._direction_at(arm, arm['k'])
@@ -655,7 +607,6 @@ class Walk:
         if J['arm_in'] is not None:
             ai = c['arms'][J['arm_in']]
             if ai['heading'] is not None and ai['nodes']: pts.append(ai['nodes'][-1]); dirs.append(ai['heading'])
-        elif J.get('heading') is not None: pts.append(J['pos']); dirs.append(J['heading'])   # a lane's junction: the stem runs through it
         for a in arms:
             if a['heading'] is not None and a['nodes']: pts.append(a['nodes'][0]); dirs.append(a['heading'])
         J['fixed'] = True
@@ -703,7 +654,7 @@ class Walk:
     def _finish(self):
         c = self.cur; arms = c['arms']; pl = self.polylines(); nj = len(c['junctions'])
         c['halt'] = 'done: ' + '; '.join(f'arm {a["id"]} {a["halt"]}' for a in arms)
-        self.lines.append(dict(id=c['id'], seed=c['seed'], nodes=np.vstack(pl) if pl else np.zeros((0, 3)), polylines=pl, misfits=self.node_misfits(), names=self.node_names(), junctions=[(J['pos'], len(J['arms'])+(J['arm_in'] is not None)+(J.get('stem') is not None), J['fixed']) for J in c['junctions']], halt=c['halt'], arms=[a['halt'] for a in arms], records=c['records']))
+        self.lines.append(dict(id=c['id'], seed=c['seed'], nodes=np.vstack(pl) if pl else np.zeros((0, 3)), polylines=pl, misfits=self.node_misfits(), names=self.node_names(), junctions=[(J['pos'], len(J['arms'])+(J['arm_in'] is not None), J['fixed']) for J in c['junctions']], halt=c['halt'], arms=[a['halt'] for a in arms], records=c['records'], bands=self.bands(arms)))
         self.log(f'line {c["id"]} done: {len(arms)} arms, {sum(len(a["nodes"]) for a in arms)} nodes, {nj} junction(s); ' + '; '.join(f'arm {a["id"]} {a["halt"]}' for a in arms))
 
     def reset(self):
@@ -721,11 +672,10 @@ class Walk:
         c = self.cur
         if c is None: return None
         mine = np.flatnonzero(self.owner == c['id']); newest = prev = None; pl = []; mf = []; nm = []
-        lane = None
         if c['stage'] == 'advance':
             pl = self.polylines(); mf = self.node_misfits(); nm = self.node_names(); a = c['arms'][c['arm']]
             if a['nodes']: newest = a['nodes'][-1]; prev = a['nodes'][-2] if len(a['nodes']) > 1 else a['start']
-            if a.get('lane') is not None and a['lane']['rows']: lane = np.concatenate(a['lane']['rows'])
-        return dict(id=c['id'], seed=c['seed'], stage=c['stage'], phase=c['phase'], round=c['round'], arm=c['arm'], halt=c['halt'], painted=mine, front=c['front'], new=c['new'], clumps=c['clumps'],
-                    region=c['region'], member=c['member'], direction=c['direction'], sure=c['sure'], share=c['share'], misfit=c.get('misfit'), climb=c['climb'], second=c['second'], climb_mean=(c['arms'][c['arm']]['climb_sum']/c['arms'][c['arm']]['climb_n'] if c['arm'] >= 0 and c['arms'][c['arm']]['climb_n'] else None), rownode=c['rownode'], polylines=pl, misfits=mf, names=nm, junctions=[(J['pos'], J['fixed']) for J in c['junctions']], newest=newest, prev=prev, queued=len(c['queue']), lane=lane,
+        bands = self.bands(c['arms'])
+        return dict(id=c['id'], seed=c['seed'], stage=c['stage'], bands=bands, phase=c['phase'], round=c['round'], arm=c['arm'], halt=c['halt'], painted=mine, front=c['front'], new=c['new'], clumps=c['clumps'],
+                    region=c['region'], member=c['member'], direction=c['direction'], sure=c['sure'], share=c['share'], misfit=c.get('misfit'), climb=c['climb'], second=c['second'], climb_mean=(c['arms'][c['arm']]['climb_sum']/c['arms'][c['arm']]['climb_n'] if c['arm'] >= 0 and c['arms'][c['arm']]['climb_n'] else None), rownode=c['rownode'], polylines=pl, misfits=mf, names=nm, junctions=[(J['pos'], J['fixed']) for J in c['junctions']], newest=newest, prev=prev, queued=len(c['queue']),
                     probe=None if c['probe'] is None else dict(rounds=c['probe']['rounds'], halves=[np.concatenate(sub['rows']) for sub in c['probe']['subs']], live=[not sub['dead'] for sub in c['probe']['subs']]), gapped=c['gapped'])

@@ -246,3 +246,41 @@ noded by nobody (parked).
 Result on the chimp: the brow arm opens its lane at row 5 (rises 1.0, 1.0, 0.3, 1.0), the convex crease is an arm of
 its own from there; the user's dots 46655/47190 stay with the concave crease, 46658/46653 go with the convex one.
 Line 1: 36 arms, 749 nodes, 4 lane arms of 4-7 nodes (before: four one-row lane arms). Line 0 unchanged but for 7 nodes.
+
+## 2026-10-26, later still: the trim at paint time (the far side of a valley ceases to exist)
+
+The leap at L1 a14 n1: the paint of the line ending at L1 a7 n26 leaked sideways onto a neighbouring stripe of dots
+near n24, crept along it by touch for two rounds, and when it parted from the crest the parting rule made it a branch
+from n26, 8 cubes away. The node-time cut had kept those dots out of the nodes but never out of the front.
+
+The user's statement, after a long misunderstanding on my side: any row, at any time, that spots a valley counts only the
+dots up to the point the tendency shifts; anything past it ceases to exist for this line. Not its row, not its front,
+not its clumps, not its parting. A second band is another line and means nothing to this one. The front shrinking on a
+noise dip is harmless: the paint grows by touch in every direction and grows back the next round if there is where to.
+
+Built: `_trim` in walk.py, applied in `_spread` to every freshly painted row (the main front, and each half of a split
+under test). The dots past a valley are unpainted again (owner -1), free for another line. The lanes, `_cut_row`,
+`_decide` and the window confirmation are removed. The view keeps the toggle "Show valleys and dots let go": orange-red
+valley dots, cyan dots let go that no line has taken since.
+
+Rig: side panel rearranged (small buttons three to a row, toggles two to a row, the log gets the height); Find pans
+the camera to the target without changing its angle; the tool remembers the last model and dot set (Lines/last.json).
+
+First run on the chimp (lead 0): line 0 21 arms, 469 nodes (was 28 / 556); line 1 177 arms, 6011 nodes, 38.9k dots
+painted (was 36 / 749 / 4.9k), none of its long arms retracing earlier ones: the line was being choked by its own leaked
+paint before. 544 trims over both lines; 1328 dots let go, 354 of them more than once. 49 arms of line 1 start with a
+first segment over 4 cubes (to look at). The brow dots 46655/47190 and 46658/46653 are all on arm 9 now, rows 13-19.
+
+## 2026-10-27: the paint grabs only dots past the front
+
+L1 a10 climbed from n12 onto a crease above and behind, then n20 leapt 16 cubes ahead. Cause: at row 12 the front touched free dots
+behind it (a little higher up), and from then on every row had a part ahead on our crease and a part behind on the other, 16 cubes
+apart by row 18; the trim reads across the heading only and both parts fell on the same bins. The nodes, centred on the rows, drifted
+back and up; row 19 held one dot ahead, hence the leap.
+
+Rule agreed: a dot is grabbed only if it lies past the front (the strength-weighted centre of the row painted the round before) in
+the direction of the walk. Dots behind stay free. Built in `_paint_from`. Line 1 went from 177 arms / 6011 nodes to 15 / 583 with no
+segment over 3 cubes; it no longer spreads backward from every arm onto neighbouring creases. Not perfect yet; the model needs a look.
+
+Rig: a "Stop at" box next to Find: a dot number; every step or run pauses right after the read that paints that dot (once per line),
+the state line says where, and the next step or run goes on from there.
