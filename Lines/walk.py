@@ -132,7 +132,7 @@ step_node() / run(). state() describes what is on screen. Every read is recorded
 import numpy as np
 
 KB = 1 << 16
-CLUMP_COLOURS = ['orange', 'deepskyblue', 'magenta', 'lime', 'gold', 'red', 'cyan', 'violet']
+CLUMP_COLOURS = ['orange', 'darkorchid', 'saddlebrown', 'teal', 'gold', 'maroon', 'olive', 'steelblue']   # none of these is used for anything else in the rig (sky blue and cyan were indistinguishable)
 
 
 def offsets(reach):
