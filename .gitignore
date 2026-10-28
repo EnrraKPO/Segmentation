@@ -22,3 +22,6 @@ out/
 
 # Lines tool: the files last in use on this machine
 Lines/last.json
+
+# a reference copy of an older version, for side-by-side looks
+ref_lastnight/

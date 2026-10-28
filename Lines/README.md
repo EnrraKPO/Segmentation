@@ -284,3 +284,25 @@ segment over 3 cubes; it no longer spreads backward from every arm onto neighbou
 
 Rig: a "Stop at" box next to Find: a dot number; every step or run pauses right after the read that paints that dot (once per line),
 the state line says where, and the next step or run goes on from there.
+
+## 2026-10-28: the arrow turn-back, and the seed's direction
+
+Resumed from commit 7220219 (the morning walk of 2026-10-27 with the rig rework); the plain-lines rework of the 27th stays
+reverted. Looked at with the user: L1 a10 left its crease from n12 and sat on another by n20. In the rows there a second
+crease ran three cubes beside ours, equally strong, with no dip in strength between them, so the trim saw one band and the
+node (the row's centre) slid across as our dots faded. The arrows told them apart: across our crease their lean swung one
+way, three cubes on it swung back.
+
+Built (the user's rule): the trim also cuts a row where the arrows' lean, read from one edge of the row to the other,
+turns back by more than the handle "Arrow turn-back (deg)" (`swing`, default 15; the two creases here swing about 50, two
+neighbouring dots on one flank differ by about 7 from their triangles). The dots are ordered by their distance from the
+heading line, height counted: the sideways-only distance of the strength trim was my shortcut and puts a dot and the one
+above it at the same place. On the user's run the climb at that spot is gone.
+
+Then L1838 a0 (a seed between two parallel creases) placed its first nodes between them: an arm had no heading before its
+first node, and a row without a heading was never trimmed. Agreed: the seed node is not a node like the others, it has no
+direction; it is given one from the arrows of its rings, and each arm leaves the seed with it as heading, so its rows are
+trimmed from the first. Where a crossing crease lies in the rings the read is blurred (the sureness says so). The user:
+climbing improved significantly, not fully resolved; on that line the nodes still move from the upper crease to the lower
+between n6 and n10. Line numbers change between runs now (the trims change the earlier lines' courses); dot numbers do not.
+Headless check of a line: run all lines with `walk.log` swapped in at the wanted seed (scratch of this session).

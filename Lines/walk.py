@@ -117,6 +117,19 @@ confirmation are gone with it: the other band is simply free for another line. F
 749 -> 6011 nodes, 4.9k -> 38.9k dots painted, with no retracing (its long arms walk new ground: the line was being
 choked by its own leaked paint before). The leak near arm 7 is let go (dots 41385, 41390 free again).
 
+The arrow turn-back (agreed 2026-10-28, after L1 a10 slid from its crease onto an equally strong one three cubes beside it,
+with no dip in strength between them): across one crease the arrows' lean about the heading changes in one direction only,
+from flank to flank; a lean that turns back is a second crease. In the trim, the row's dots are ordered by their distance
+from the heading line through the reference (height counted, so stacked dots do not collide; one side negative) and read
+edge to edge; a turn-back over `swing` degrees (a handle: two dots on one flank differ by a few degrees from their
+triangles) cuts the row after the dot of the extreme lean, the shared flank; our piece is the one the reference falls in.
+The seed's direction (same day, after a seed between two parallel creases placed its first nodes between them: an arm had
+no heading before its first node, and rows without a heading were never trimmed): the seed node is not a node like the
+others, it has no direction of its own; it is given one from the arrows of its rings, read as every node reads its own,
+and each arm leaves the seed with it as its heading, toward its clump, so its rows are trimmed from the first one (the
+clump itself with the seed node as the reference). Where a crossing crease lies inside the rings the read is blurred;
+the sureness says so.
+
 Leads (agreed 2026-10-25, last; measured only, nothing acts on it yet): across a crease, from the crest outward, strength
 only falls or holds; a rise after a fall is a second lead, a second crease in the same band (a split before the dots
 come apart, or two parallel creases walked as one band). Per node: the window's dots are ordered across the band
@@ -168,11 +181,11 @@ def meeting_point(points, dirs):
 
 
 class Walk:
-    def __init__(self, dots, snap=None, log=None, cap=30, reach=1, window=3, gap=0.0, fork=20.0, kink=30.0, lead=0.0):
+    def __init__(self, dots, snap=None, log=None, cap=30, reach=1, window=3, gap=0.0, fork=20.0, kink=30.0, lead=0.0, swing=15.0):
         self.idx = dots['idx']; self.N = dots['N'].astype(np.float64); self.w = np.asarray(dots['turn'], np.float64); self.size = float(dots['size']); self.lo = np.asarray(dots['lo'], float)
         self.X = self.lo+(self.idx+0.5)*self.size; self.k = len(self.idx); self.reach = int(reach); self.window = int(window); self.nb = neighbours(self.idx, self.reach)
         self.owner = np.full(self.k, -1, np.int32); self.lines = []; self.snap = snap or (lambda p, n: p); self.log = log or (lambda s: None); self.cap = int(cap)
-        self.gap = float(gap); self.fork = float(fork); self.kink = float(kink); self.lead = float(lead); self._tree = None; self._sub = np.full(self.k, -1, np.int32)   # gap radius (mm); the dot tree for it, built when first needed; the half each dot was painted by during a split test
+        self.gap = float(gap); self.fork = float(fork); self.kink = float(kink); self.lead = float(lead); self.swing = float(swing); self._tree = None; self._sub = np.full(self.k, -1, np.int32)   # gap radius (mm); the dot tree for it, built when first needed; the half each dot was painted by during a split test
         self.cur = None   # the walk under way
         self.stop_at = None; self.paused = False   # a breakpoint: the dot the walk pauses at, the moment a read paints it (once per line); `paused` is set by that read and cleared by the next step
 
@@ -459,7 +472,14 @@ class Walk:
                 q, mv = self._seed_node(); c['seed_node'] = q; before = c['ring']
                 jid = None
                 if n > 2: jid = self._new_junction(q, None); self.log(f'node: {n} clumps at the seed: the seed is a junction')
-                for g in cl: self._new_arm(g, q, before, jid)
+                # the seed's direction (agreed 2026-10-28): read from the arrows of the rings, as every node reads its own; each arm
+                # leaves the seed with it as its heading, pointed toward its clump, so its rows are trimmed from the first one
+                rings = np.concatenate(before); t, sure = crease_direction(self.N[rings], self.w[rings]); c['direction'] = t; c['sure'] = sure
+                self.log(f'seed direction from the arrows of {len(rings)} ring dots: {self._fmt(t)}, sureness {sure:.3f} (0 = a clean crease, 1 = none)')
+                for g in cl:
+                    a = self._new_arm(g, q, before, jid); d = self._centre(g)-q; a['heading'] = t if d @ t >= 0 else -t
+                    a['rows'][0] = self._trim(a, g, None, origin=q)
+                c['records'].append(dict(round=c['round'], stage='find', read='seed', node=[float(v) for v in q], direction=[float(v) for v in t], sureness=sure, rings=len(rings)))
                 c['stage'] = 'advance'; self._next_arm()
                 self.log(f'node: {"two clumps, the line found" if n == 2 else str(n)+" arms"}; seed node {self._fmt(q)} (snap moved {mv*1000:.1f} um); the paint runs {self.window} rows ahead of the nodes')
             elif n == 0: self._halt('no dots around the seed')
@@ -486,7 +506,7 @@ class Walk:
     def _centre(self, g):
         wl = self.w[g]/max(self.w[g].sum(), 1e-12); return (self.X[g]*wl[:, None]).sum(0)
 
-    def _trim(self, arm, row, prev):
+    def _trim(self, arm, row, prev, origin=None):
         """a freshly painted row keeps only the dots up to the valley (agreed 2026-10-26, late): read across in bins one cube
         wide (each bin its strongest dot, every dot at full strength), a valley is a run of bins lower than the runs on both
         sides, its rise past the valley over `lead` of the lower neighbouring crest. Our piece is the one holding the reference,
@@ -496,7 +516,7 @@ class Walk:
         touch. Returns the trimmed row. No heading yet (an arm's first rows): the row stays whole."""
         t = arm['heading']; j = len(arm['rows'])
         if t is None or len(row) < 2: return row
-        origin = self._centre(prev) if prev is not None and len(prev) else (self._centre(arm['before'][-1]) if arm['before'] and len(arm['before'][-1]) else arm['start'])
+        if origin is None: origin = self._centre(prev) if prev is not None and len(prev) else (self._centre(arm['before'][-1]) if arm['before'] and len(arm['before'][-1]) else arm['start'])
         a = self._across(row, t); sx = (self.X[row]-origin) @ a/self.size; b = np.rint(sx).astype(int); lo = b.min(); b -= lo
         prof = np.zeros(b.max()+1); np.maximum.at(prof, b, self.w[row])
         runs = []                                                             # (first bin, last bin, strength) of each run of equal bins
@@ -508,16 +528,31 @@ class Walk:
             if not (runs[r][2] < runs[r-1][2] and runs[r][2] < runs[r+1][2]): continue
             left = max(x[2] for x in runs[:r]); right = max(x[2] for x in runs[r+1:]); v = runs[r][2]; rise = min(left, right)-v
             if rise > self.lead*min(left, right): valleys.append((runs[r][0], runs[r][1], rise/max(min(left, right), 1e-12)))
-        if not valleys: return row
         b0 = int(np.clip(-lo, 0, len(prof)-1))                               # the bin the reference falls in
         L = [v for v in valleys if v[1] < b0]; R = [v for v in valleys if v[0] > b0]
         keep = np.ones(len(row), bool); vmask = np.zeros(len(row), bool); gone = {}
         if L: v = L[-1]; keep &= b >= v[0]; vmask |= (b >= v[0]) & (b <= v[1]); gone[-1] = (int((b < v[0]).sum()), round(v[2], 2))
         if R: v = R[0]; keep &= b <= v[1]; vmask |= (b >= v[0]) & (b <= v[1]); gone[1] = (int((b > v[1]).sum()), round(v[2], 2))
+        # the arrow swing (agreed 2026-10-28): the dots ordered by their distance from the heading line through the reference,
+        # one side negative; read from one edge of the row to the other, the arrows' lean about the heading must keep turning
+        # the same way (one crease is one swing); a lean that turns back by more than `swing` degrees is a second crease, and the
+        # row is cut after the dot of the extreme lean (the shared flank). Our piece is the one the reference falls in.
+        off = self.X[row]-origin; off -= (off @ t)[:, None]*t; s = np.sign(off @ a)*np.linalg.norm(off, axis=1)
+        u = np.cross(t, a); lean = np.degrees(np.arctan2(self.N[row] @ a, self.N[row] @ u)); o = np.argsort(s)
+        cuts = []; d = 0; ext = lean[o[0]]; ei = 0                            # cuts: (position of the cut along s, size of the turn-back)
+        for q in range(1, len(o)):
+            lq = lean[o[q]]
+            if d == 0:
+                if abs(lq-ext) > self.swing: d = 1 if lq > ext else -1; ext = lq; ei = q
+            elif (lq-ext)*d > 0: ext = lq; ei = q
+            elif (ext-lq)*d > self.swing: cuts.append((0.5*(s[o[ei]]+s[o[ei+1]]), abs(ext-lq))); vmask[o[ei]] = True; d = 0; ext = lq; ei = q
+        for pos, size in cuts:
+            if pos < 0: m = s < pos; gone[-2] = (int(m.sum()), round(float(size), 0)); keep &= ~m
+            else: m = s > pos; gone[2] = (int(m.sum()), round(float(size), 0)); keep &= ~m
         if not gone or keep.all() or not keep.any(): return row
         far = row[~keep]; self.owner[far] = -1; arm['aside'].append(far); arm['valleys'][j] = row[vmask]
         self.cur['records'].append(dict(round=self.cur['round'], stage='advance', arm=arm['id'], read='trim', row=j, kept=int(keep.sum()), gone={int(k): v for k, v in gone.items()}, profile=[int(v) for v in prof]))
-        self.log(f'trim: row {j} of arm {arm["id"]} keeps {int(keep.sum())} of {len(row)} dots: ' + ', '.join(f'{n} past a valley on the {"right" if sd == 1 else "left"} (rise {rs:g} of the crest)' for sd, (n, rs) in gone.items()) + ' let go')
+        self.log(f'trim: row {j} of arm {arm["id"]} keeps {int(keep.sum())} of {len(row)} dots: ' + ', '.join((f'{n} past a valley on the {"right" if sd == 1 else "left"} (rise {rs:g} of the crest)' if abs(sd) == 1 else f'{n} past an arrow turn-back of {rs:g} deg on the {"right" if sd > 0 else "left"}') for sd, (n, rs) in gone.items()) + ' let go')
         return row[keep]
 
     def bands(self, arms):

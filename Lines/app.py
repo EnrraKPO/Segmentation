@@ -46,6 +46,7 @@ SETTINGS = [   # key, label, default, lo, hi, step, decimals, tip
     ('fork', 'Faulty row (deg)', 20, 1, 90, 1, 0, "A row is faulty when its own arrows are more than this many degrees off right angles to the stem's line (a stem reads 2-8, a fork 15-50). Faulty rows ahead are dropped from a node's window; a node whose own row is faulty cuts the stem: the branches open from the node before."),
     ('kink', 'Loose branch (deg)', 30, 1, 90, 1, 0, "A branch's first segment, from the junction to its first node, must run along the stem's line or along the branch's own direction. Off both by more than this many degrees it follows no crease: the branch is cut loose from the junction and walked on as a line of its own (a real fork reads 1-15 off its own line, a false one 40-90)."),
     ('lead', 'Second crest (share of the crest)', 0.0, 0, 1, 0.05, 2, "A row is read across, every dot at full strength: from its strongest crest outward, a rise after a dip is a second crest. A rise over this share of the crest's strength makes the row two rows: the arm keeps the crest its last row sits on, the other crest becomes a second band under the same paint, an arm of its own from a junction on the stem. 0: any dip counts."),
+    ('swing', 'Arrow turn-back (deg)', 15, 0, 90, 1, 0, "A row is read outward from the heading line, each side on its own, by each dot's distance from that line. The arrows' lean about the heading must keep turning the same way; a lean that turns back by more than this many degrees is a second crease, and the dots from there on are let go (two neighbouring dots on one flank differ by a few degrees from the triangles they sit on; the two creases on the chimp swing about 50). 0: any turn-back cuts."),
     ('cap', 'Finding cap (rounds)', 30, 2, 1000, 1, 0, 'The finding stage halts when the ring has not split in two within this many rounds. A cap for Run, not a rule.'),
     ('maxnodes', 'Run cap (nodes)', 100000, 10, 10000000, 1000, 0, 'Run stops after this many nodes.'),
 ]
@@ -133,6 +134,7 @@ class SettingsDialog(QtWidgets.QDialog):
         if k == 'gap' and self.app.walk is not None: self.app.walk.gap = float(v); self.app.logmsg(f'gap radius {v:g} mm: applies from the next dead end')
         if k == 'fork' and self.app.walk is not None: self.app.walk.fork = float(v); self.app.logmsg(f'faulty row {v:g} deg: applies from the next node')
         if k == 'kink' and self.app.walk is not None: self.app.walk.kink = float(v); self.app.logmsg(f'loose branch {v:g} deg: applies from the next branch')
+        if k == 'swing' and self.app.walk is not None: self.app.walk.swing = float(v); self.app.logmsg(f'arrow turn-back {v:g} deg: applies from the next row')
         if k == 'lead' and self.app.walk is not None: self.app.walk.lead = float(v); self.app.logmsg(f'second crest {v:g} of the crest: applies from the next row')
         if k in ('dotlift', 'dotsize', 'linelift'): self.app.redraw()
     def _shade(self, on): self.app.flat_shading = on; self.app.redraw()
@@ -290,7 +292,7 @@ class App(QtWidgets.QMainWindow):
         if self.walk is None:
             t0 = time.time()
             if self.snap is None: self.snap = make_snap(self.P, self.F)
-            self.walk = walkmod.Walk(self.dots, snap=self.snap, log=self.logmsg, cap=int(self.settings['cap']), reach=int(self.settings['reach']), window=int(self.settings['window']), gap=float(self.settings['gap']), fork=float(self.settings['fork']), kink=float(self.settings['kink']), lead=float(self.settings['lead']))
+            self.walk = walkmod.Walk(self.dots, snap=self.snap, log=self.logmsg, cap=int(self.settings['cap']), reach=int(self.settings['reach']), window=int(self.settings['window']), gap=float(self.settings['gap']), fork=float(self.settings['fork']), kink=float(self.settings['kink']), lead=float(self.settings['lead']), swing=float(self.settings['swing']))
             self.logmsg(f'walk ready: {self.walk.k} dots, neighbour table at reach {self.walk.reach} in {time.time()-t0:.1f} s'); self.set_stop()
         return self.walk
 
