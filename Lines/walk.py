@@ -8,8 +8,9 @@ dots touching each other are one clump). While the paint spreads evenly the ring
 have stopped, the new dots fall in two opposite clumps: the line's two arms. From there each round's new dots is one
 row of the band. The first arm is painted to its halt, then the second. Halts: a round's new dots in more than one
 clump (a branch: a junction, see below), no new dots (the band ends, or the paint has come round
-onto its own line), a new dot already painted by another line (a collision). Finding halts too when the ring never
-splits within the round cap.
+onto its own line), a new dot already painted by another line (a collision; an arm's halt only: the seed's ring goes on
+without those dots, agreed 2026-10-28, after 5072 of 5573 seeds died at a touch and held 20k dots no line walked). Finding
+halts too when the ring never splits within the round cap.
 
 The node (agreed 2026-10-25 after the row centres gave a sawtooth: the dots' positions are grid points, their arrows
 carry the crease). For row k the region is rows k-window .. k+window of this arm, so the paint runs `window` rows ahead
@@ -466,8 +467,9 @@ class Walk:
 
     def _node(self):
         c = self.cur; cl = c['clumps']; n = len(cl)
-        if len(c['foreign']): self._halt_arm_or_line(f'collision with line {int(np.bincount(self.owner[c["foreign"]]).argmax())}'); return
+        if len(c['foreign']) and c['stage'] != 'find': self._arm_halt(f'collision with line {int(np.bincount(self.owner[c["foreign"]]).argmax())}'); return
         if c['stage'] == 'find':
+            if len(c['foreign']): self.log(f'  the ring touches line {int(np.bincount(self.owner[c["foreign"]]).argmax())} on one side and goes on without its dots (agreed 2026-10-28: the whole seed used to die here)')
             if n >= 2:
                 q, mv = self._seed_node(); c['seed_node'] = q; before = c['ring']
                 jid = None
