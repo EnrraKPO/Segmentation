@@ -306,3 +306,92 @@ trimmed from the first. Where a crossing crease lies in the rings the read is bl
 climbing improved significantly, not fully resolved; on that line the nodes still move from the upper crease to the lower
 between n6 and n10. Line numbers change between runs now (the trims change the earlier lines' courses); dot numbers do not.
 Headless check of a line: run all lines with `walk.log` swapped in at the wanted seed (scratch of this session).
+
+## 2026-10-30/31: other lines' dots, the join, the seed rule, the trim reference, the seed's dip
+
+Started from the small lines "crawling around a crease" (L965 seed). Found: the behind-the-front rule leaves about one dot
+in seven of a band unpainted (a dot one cube behind, one and a half sideways); of 4505 lines, 2756 seeded on such leftovers.
+
+Agreed with the user over the two days, and built (walk.py, app.py):
+- Other lines' dots are not invisible. The paint spreads over them (mask `_in`: the dots in this walk's paint, own or borrowed;
+  `owner` keeps the line a dot was found on). A row made entirely of another line's dots halts the arm: that crease is walked.
+  The old halt on touching another line's dot is gone.
+- The join (handle "Join: owned share of the row", 0.5; "Merge within (share of node spacing)", 0.5): a node whose row's
+  strength is mostly another line's merges into that line's nearest node when within `near` of its node spacing, else it is
+  inserted as a new node on the nearest segment (named "L{line} joined by L{k}"). Ownership, not distance, tells parallel
+  creases apart. A seed ring that is all another line's joins its seed node into that line and the line halts.
+- The seed rule: a free dot whose neighbours' strength is mostly (> join) one line's is that line's dot, not a seed (lines
+  4505 -> 2040 on the chimp at that point).
+- The trim reference: the strongest trail dot touching the row (before: the centre of the row before, an average, which
+  could sit in the dip between two crests; L403's seed node did). A reference that falls inside a valley takes the nearest
+  crest: "the lowest of a dip is as sharp a cut as the highest of a crest".
+- The seed's dip (31st, after L798 seeded on a weak bump beside line 396): rings grow in every direction with no heading, so
+  the paint walked over the dip around the seed onto line 396's band, and the clump past the dip, handed to the arm as its
+  first row, put the first node on line 396; the trim reads only the row, never the ring the dip lay in. Built: at the split,
+  before the seed node, each clump is read along the direction from the seed to it with the valley read the trim uses across
+  (now one shared piece, `_dip_cut`), the seed as the reference. A seed that is a peak keeps a clump with no dip on its path
+  and lets go of one beyond a dip; a seed in a dip goes with the nearest crest and lets go of the rest. The dots let go are
+  unpainted again; the dip dots themselves stay painted but make no row. One clump left is a plain line with one arm; none
+  left halts the line at its seed node, "a bump of its own". Both cases looked at (seeds 47704 and 42843) now halt there.
+
+Whole chimp set, seed cut off / on: 2277 / 3447 lines, 31370 / 26957 nodes, 2843 / 1459 joins, 1225 / 2187 lines without a
+node, 769 seeds halted as a bump. The user: "expected a bit more of an improvement; hard to tell, so much is still broken".
+Open: lead sits at 0, so a dip of one unit cuts; whether the 769 bumps are real or dips read too finely needs the eye. The
+join's insert half makes zigzag "joined by" nodes the user judges broken (L1009/L1346, L1418); no decision yet. Dots left
+behind the front are to be monitored. Headless runs and replays live in the session scratchpad (run_seedcut.py, baseline.py).
+Line numbers differ between the app's run and the headless replay (e.g. 403 vs 570 for seed 42843); dot numbers do not.
+
+## 2026-10-31 afternoon: the seed's dip read sideways
+
+Looked at with the user: L52 a1 n1 (seed 27751) halted after one node, and seed 29660 beside it (strength 66) was declared "a
+bump of its own"; between them a patch of painted dots no line walked, and line 115 that seeded in the patch halted on
+"the ring is all another line's" with its node lost into the bump's empty record. Cause, both: the seed's dip read ran along
+the path from the seed to each clump. A seed is the strongest dot of its patch, so along the crease the strength can only
+fall from it, and the wobble along a crest (one to three points on 29660's two sides, twelve on 27751's) read as a rise after
+a dip. The user's framing: the dip read at the seed exists to tell a clump in another crease from the two ends of our own
+or a branch; across a band a dip is a second crest, along it a dip is noise; the seed has no heading for the row read.
+Agreed and built: the seed's direction (the rings' arrows) is read before the cut, and the cut is one sideways read over
+the painted dots along the across axis of that heading, the seed as the reference, the trim's valley read. A clump ahead
+or behind sits at the seed's own across position and is never cut; a clump to the side past a valley is let go. Whole set:
+3447 -> 2308 lines, 26957 -> 31325 nodes, 769 -> 14 bump halts, 2187 -> 1244 lines without a node, 1459 -> 2757 joins.
+Seed 29660 now walks a line of 143 nodes that also takes 27751's patch. Open, raised by the user: a seed that halts without a
+node keeps a line record and its painted dots (no later seed can start there, a join into it is lost); not changed yet.
+Log fix: the spread's "belong to line" count now reads the row as the trim left it.
+
+## 2026-10-31 evening: the join is the nearest node; the first node is the row through the seed
+
+L50 a0 n9 (seed on leftover flank dots beside line 50's walked band): rows 100% line 50's were inserted and merged into
+line 50 as "joined by" nodes, branches landing on its nodes, the whole system collapsing onto the joined node. The user's
+reading: a trimmed row landing on a walked band is on a crease that was read whole and already has a node for that spot;
+our row sees part of the band and cannot do better. Agreed and built: a row that, after the trim, holds any dot of another
+line takes that line's nearest node as its node; nothing is inserted; the two handles that served the join (join, near) are
+gone, `seedshare` keeps the seed rule. The walk goes on past the joint along its heading. Whole set: 2302 lines, 29661
+nodes, 3324 joins, 14 bump halts. Found on the way: bands touch before trails meet, so consecutive rows can merge onto the
+same node (452 merged nodes repeat their neighbour exactly, 97 turn the line back on itself).
+
+L22 a6 n16 (seed 37196, line 368): a seed on a leftover flank dot a cube and a half beside line 22's crest; its first node
+off the crest, every later node one of line 22's, drawn as a loop out of line 22 and back. The user rejected the rings as
+anything but the gathering of dots until the heading is known: once it is, the dots around the seed are paint on the band,
+and the row through the seed is a row like any other. Built: the first node is the slice of the ring dots one cube thick
+along the heading at the seed, read as a row (across from all the ring dots, along from the slice, onto the surface), join
+included: a dot of another line in it makes the node that line's nearest. The seed dot has no standing of its own. The
+`_seed_node` ring centre stays only for the halt on a ring entirely another line's, where no heading is read. Seed 37196's
+first node is now L22 a6 n13. Whole set: 2301 lines, 29645 nodes, 3661 joins; 351 first nodes joined. Found on the way, not
+changed: a seed whose first node joins still walks its arms, and where every row lands on the same band the line is a
+string of that line's nodes (263 lines have no node of their own, 228 before); the seed cut on that seed let go of line 22's
+crest dots on a dip of 51, 43, 50 across, the crest drifting over neighbouring one-cube bins (the "ripple", open).
+
+## 2026-10-31 evening, later: a stripe reads its sum per cube of length
+
+L279 (seed 46985 beside line 18) dented like L368: the seed cut let go of line 18's crest on 52, 47, 54 across, so the row
+through the seed held no line 18 dot and there was nothing to join. Walked through with the user: the cut reads the whole
+patch (rings and clumps, several rows' worth) as one cross-section; a stripe across runs the whole length of the patch and
+took its strongest dot as its value, so one dot of one row set a whole stripe and the waver along the crest read as a dip
+across (the "ripple"). The user: "this is noise; a bit of dust on one edge reads as a bump all across"; and a stripe with
+few dots should carry its share of nothing. Agreed and built: a stripe reads the sum of its dots' strengths divided by its
+length; at the seed the patch is the disc the rings make (radius = ring count, the clumps the ring beyond), so a stripe at
+distance d across is a chord of it, never under one cube; in the trim a row's stripe is one cube long, so its sum. The lead
+stays at zero for now; the tolerance from the variation is the next step. Whole set: 2301 -> 2360 lines, 29645 -> 30122
+nodes, 3661 -> 4062 joins, 14 -> 7 bumps; seed 46985 is now painted by line 18's own walk (no line starts there); seed
+37196 still cuts on a 1% dip (82, 81, 105 across) but its first node joins line 22. The dips that cut are deeper than
+before (median rise 0.26 of the crest, 0.07 before) yet with the lead at zero 54 of 455 seed cuts fall on a rise under 5%.

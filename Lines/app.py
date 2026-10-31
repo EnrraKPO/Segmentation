@@ -47,6 +47,7 @@ SETTINGS = [   # key, label, default, lo, hi, step, decimals, tip
     ('kink', 'Loose branch (deg)', 30, 1, 90, 1, 0, "A branch's first segment, from the junction to its first node, must run along the stem's line or along the branch's own direction. Off both by more than this many degrees it follows no crease: the branch is cut loose from the junction and walked on as a line of its own (a real fork reads 1-15 off its own line, a false one 40-90)."),
     ('lead', 'Second crest (share of the crest)', 0.0, 0, 1, 0.05, 2, "A row is read across, every dot at full strength: from its strongest crest outward, a rise after a dip is a second crest. A rise over this share of the crest's strength makes the row two rows: the arm keeps the crest its last row sits on, the other crest becomes a second band under the same paint, an arm of its own from a junction on the stem. 0: any dip counts."),
     ('swing', 'Arrow turn-back (deg)', 15, 0, 90, 1, 0, "A row is read outward from the heading line, each side on its own, by each dot's distance from that line. The arrows' lean about the heading must keep turning the same way; a lean that turns back by more than this many degrees is a second crease, and the dots from there on are let go (two neighbouring dots on one flank differ by a few degrees from the triangles they sit on; the two creases on the chimp swing about 50). 0: any turn-back cuts."),
+    ('seedshare', 'Seed: owned share next door', 0.5, 0, 1, 0.05, 2, "A free dot whose next-door neighbours' strength is over this share one line's is that line's dot, one more of its band, and not a seed. (The join itself has no handle: a row that still holds a dot of another line after the trim takes that line's nearest node.)"),
     ('cap', 'Finding cap (rounds)', 30, 2, 1000, 1, 0, 'The finding stage halts when the ring has not split in two within this many rounds. A cap for Run, not a rule.'),
     ('maxnodes', 'Run cap (nodes)', 100000, 10, 10000000, 1000, 0, 'Run stops after this many nodes.'),
 ]
@@ -56,7 +57,7 @@ TIPS = dict(
     start='Begins a line at the seed: its dot is painted and the finding stage is set to spread. Nothing is read yet.',
     read='One read. Spread: paint every unpainted dot touching the front. Clump: group the new dots by touching. Direction: the crease direction from the arrows of the rows around the node. Node: decide (ring, line found, branch, end) and place the node: across at the centre of those rows, along at its own row.',
     node='Reads until a node is placed or the walk halts.',
-    run='Reads until the arm under way halts (its end, a junction, a collision) or a split comes under test, then stops so you can look.',
+    run='Reads until the arm under way halts (its end, a junction, a row that is all another line\'s) or a split comes under test, then stops so you can look.',
     runall='Reads until the whole walk is done: every arm, every junction.',
     runlines='Walks every line in the set: the strongest free dot seeds a line, it is run to its end, and so on until no free dot is left. Every read goes to the session log file; the box gets one line per finished line.',
     find='Type a name and press Enter to select it and move the camera there. A dot: "dot 53873" (or just 53873), its number in the loaded set, as the log names it. A node: "L2 a5 n7" (line 2, arm 5, node 7, numbered as the log does), "L2 seed" or "L2 a5 start".',
@@ -68,7 +69,7 @@ TIPS = dict(
 
 COLOUR_WORDS = dict(khaki='khaki', tan='tan', white='white', yellow='yellow', lightgreen='light green', hotpink='pink', salmon='salmon', darkgreen='dark green', blue='blue', navy='navy',
                     purple='purple', magenta='magenta', red='red', lime='bright green', cyan='cyan', orangered='orange-red', orange='orange', darkorchid='violet', saddlebrown='brown',
-                    teal='teal', gold='gold', maroon='maroon', olive='olive', steelblue='steel blue', grey='grey')   # the legend names each colour in words, so an entry can be matched by word, not by shade
+                    teal='teal', gold='gold', maroon='maroon', olive='olive', steelblue='steel blue', grey='grey', plum='plum', chartreuse='yellow-green')   # the legend names each colour in words, so an entry can be matched by word, not by shade
 
 LAST_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'last.json')   # the model and dot set last in use
 
@@ -136,6 +137,7 @@ class SettingsDialog(QtWidgets.QDialog):
         if k == 'kink' and self.app.walk is not None: self.app.walk.kink = float(v); self.app.logmsg(f'loose branch {v:g} deg: applies from the next branch')
         if k == 'swing' and self.app.walk is not None: self.app.walk.swing = float(v); self.app.logmsg(f'arrow turn-back {v:g} deg: applies from the next row')
         if k == 'lead' and self.app.walk is not None: self.app.walk.lead = float(v); self.app.logmsg(f'second crest {v:g} of the crest: applies from the next row')
+        if k == 'seedshare' and self.app.walk is not None: self.app.walk.seedshare = float(v); self.app.logmsg(f'seed share {v:g}: applies from the next seed')
         if k in ('dotlift', 'dotsize', 'linelift'): self.app.redraw()
     def _shade(self, on): self.app.flat_shading = on; self.app.redraw()
 
@@ -213,6 +215,8 @@ class App(QtWidgets.QMainWindow):
         self.chk_paint = check('Show painted dots', TIPS['paint'] + ' Khaki: earlier lines, tan: this line.')
         self.chk_shade = check('Shade dots by strength', 'Light = weak, black = strong.')
         self.chk_top = check('Hidden parts faint through the mesh', 'Hidden parts of lines are shown faint through the mesh; arrows always on top.')
+        self.chk_junctions = check('Show junctions', 'Purple: a corrected junction, magenta: a provisional one; finished lines and the line under way.')
+        self.chk_joins = check('Show joins', "Yellow-green: nodes read on another line's band and taken as that line's nearest node, finished lines and the line under way.")
         self.chk_bands = check('Show valleys and dots let go', 'Orange-red: the valley dots of every trimmed row. Cyan: dots past a valley, let go by the line (unpainted again, free for another line).')
         self.chk_legend = check('Legend (above)', 'What the colours mean, for what is on screen now.', on=False); self.chk_legend.stateChanged.connect(lambda st: self.lbl_legend.setVisible(bool(st))); self.lbl_legend.setVisible(False)
         fh = QtWidgets.QHBoxLayout(); v3.addLayout(fh); fh.addWidget(QtWidgets.QLabel('Hidden parts'))
@@ -292,7 +296,7 @@ class App(QtWidgets.QMainWindow):
         if self.walk is None:
             t0 = time.time()
             if self.snap is None: self.snap = make_snap(self.P, self.F)
-            self.walk = walkmod.Walk(self.dots, snap=self.snap, log=self.logmsg, cap=int(self.settings['cap']), reach=int(self.settings['reach']), window=int(self.settings['window']), gap=float(self.settings['gap']), fork=float(self.settings['fork']), kink=float(self.settings['kink']), lead=float(self.settings['lead']), swing=float(self.settings['swing']))
+            self.walk = walkmod.Walk(self.dots, snap=self.snap, log=self.logmsg, cap=int(self.settings['cap']), reach=int(self.settings['reach']), window=int(self.settings['window']), gap=float(self.settings['gap']), fork=float(self.settings['fork']), kink=float(self.settings['kink']), lead=float(self.settings['lead']), swing=float(self.settings['swing']), seedshare=float(self.settings['seedshare']))
             self.logmsg(f'walk ready: {self.walk.k} dots, neighbour table at reach {self.walk.reach} in {time.time()-t0:.1f} s'); self.set_stop()
         return self.walk
 
@@ -317,7 +321,9 @@ class App(QtWidgets.QMainWindow):
         else:
             seed = w.strongest_free()
             if seed is None: self.logmsg('no free dot left'); return
-        if w.start(seed): self._after()
+        r = w.start(seed)
+        if r: self._after()
+        elif r is None: self.redraw()
 
     def _after(self):
         w = self.walk; c = w.cur
@@ -351,14 +357,16 @@ class App(QtWidgets.QMainWindow):
             while not w.paused:
                 seed = w.strongest_free()
                 if seed is None: break
-                if not w.start(seed): break
+                r = w.start(seed)
+                if r is None: continue   # the dot was another line's: painted as such, no walk
+                if not r: break
                 w.run(cap)
                 if w.paused: self.logmsg(f'line {w.cur["id"]} stopped at dot {w.stop_at}'); break
                 L = w.lines[-1]
                 self.logmsg(f'line {L["id"]}: seed dot {L["seed"]}, {len(L.get("polylines", []))} arm(s), {len(L["nodes"])} nodes, {len(L.get("junctions", []))} junction(s); {L["halt"][:80]}')
                 if (len(w.lines)-n0) % 20 == 0: QtWidgets.QApplication.processEvents()
         finally: w.log = box_log
-        done = w.lines[n0:]; self.logmsg(f'run all lines: {len(done)} lines, {sum(len(L["nodes"]) for L in done)} nodes, {sum(len(L.get("junctions", [])) for L in done)} junctions, {int((w.owner != -1).sum())} of {w.k} dots painted, {time.time()-t0:.1f} s')
+        done = w.lines[n0:]; self.logmsg(f'run all lines: {len(done)} lines, {sum(len(L["nodes"]) for L in done)} nodes, {sum(len(L.get("junctions", [])) for L in done)} junctions, {getattr(w, "absorbed", 0)} free dots given to the line beside them, {int((w.owner != -1).sum())} of {w.k} dots painted, {time.time()-t0:.1f} s')
         self._after()
 
     def reset_walk(self):
@@ -390,7 +398,7 @@ class App(QtWidgets.QMainWindow):
 
     # ---- names: a dot by its number in the set, a node by line, arm and number as the log has them ----
     def _node_name(self, line, arm, k):
-        return f'L{line} seed' if arm < 0 else f'L{line} a{arm} start' if k < 0 else f'L{line} a{arm} n{k+1}'
+        return f'L{line} joined by L{k}' if arm == -2 else f'L{line} seed' if arm < 0 else f'L{line} a{arm} start' if k < 0 else f'L{line} a{arm} n{k+1}'
     def _line_name(self, li, nl):
         """the name of a drawn polyline from its node names: 'L2 a5' for an arm, 'L2 a0 + a1' for the two seed arms drawn as one"""
         arms = sorted({a for a, k in nl if a >= 0})
@@ -569,8 +577,10 @@ class App(QtWidgets.QMainWindow):
             if show_lines:
                 self._polylines_batch(pls, mfs, 'navy', 4, 6, names=nms if len(nms) == len(pls) else None, line=lids)
                 jf = [pos for L in w.lines for pos, deg, fixed in L.get('junctions', []) if fixed]; jp = [pos for L in w.lines for pos, deg, fixed in L.get('junctions', []) if not fixed]
-                if jf: self._points(jf, 'purple', huge, top=True)
-                if jp: self._points(jp, 'magenta', huge, top=True)
+                if jf and self.chk_junctions.isChecked(): self._points(jf, 'purple', huge, top=True)
+                if jp and self.chk_junctions.isChecked(): self._points(jp, 'magenta', huge, top=True)
+                jn = [pos for L in w.lines for pos, j, kind in L.get('joins', [])]
+                if jn and self.chk_joins.isChecked(): self._points(jn, 'chartreuse', huge, top=True); legend.append((f"joins: nodes read on another line's band, taken as its nearest node ({len(jn)})", 'chartreuse'))
                 if w.lines: legend.append(('finished lines', 'navy'))
             if self.chk_bands.isChecked() and w.lines:
                 bl = [L['bands'] for L in w.lines if L.get('bands')]
@@ -580,6 +590,8 @@ class App(QtWidgets.QMainWindow):
             st = w.state()
             if st is not None:
                 if self.chk_paint.isChecked(): self._points(self._pts(st['painted']), 'tan', ds+1); legend.append(('dots this line has taken so far', 'tan'))
+                if len(st['borrowed']): self._points(self._pts(st['borrowed']), 'plum', ds+1); legend.append((f'dots of other lines this line reads ({len(st["borrowed"])})', 'plum'))
+                if st['joins'] and self.chk_joins.isChecked(): self._points([p for p, j, kind in st['joins']], 'chartreuse', huge, top=True); legend.append((f'joins into other lines ({len(st["joins"])})', 'chartreuse'))
                 self._points(self._pts(st['front']), 'white', big); legend.append(('the front: the dots taken in the last round, where the walk grows from', 'white'))
                 if self.chk_bands.isChecked():
                     b = st['bands']
@@ -597,9 +609,9 @@ class App(QtWidgets.QMainWindow):
                     self._polylines_batch(st['polylines'], st['misfits'], 'blue', 5, big, names=st['names'] if len(st['names']) == len(st['polylines']) else None, line=[st['id']]*len(st['polylines']))
                     legend.append(('nodes: blue where the arrows fit one line (a crease), red where they do not (a fork)', 'blue'))
                     jf = [pos for pos, fixed in st['junctions'] if fixed]; jp = [pos for pos, fixed in st['junctions'] if not fixed]
-                    if jf: self._points(jf, 'purple', huge, top=True)
-                    if jp: self._points(jp, 'magenta', huge, top=True)
-                    if st['junctions']: legend.append(('junction, provisional', 'magenta')); legend.append(('junction, corrected', 'purple'))
+                    if jf and self.chk_junctions.isChecked(): self._points(jf, 'purple', huge, top=True)
+                    if jp and self.chk_junctions.isChecked(): self._points(jp, 'magenta', huge, top=True)
+                    if st['junctions'] and self.chk_junctions.isChecked(): legend.append(('junction, provisional', 'magenta')); legend.append(('junction, corrected', 'purple'))
                     if st['newest'] is not None: self._points([st['newest']], 'blue', huge+4, top=True)
                 # the direction: at the finding stage from the seed to each clump; while advancing, from the newest node (or the seed) toward the front
                 if len(st['region']):

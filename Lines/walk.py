@@ -7,10 +7,19 @@ paints every unpainted dot touching the dots painted last round (the front); the
 dots touching each other are one clump). While the paint spreads evenly the ring is one clump; once the band's sides
 have stopped, the new dots fall in two opposite clumps: the line's two arms. From there each round's new dots is one
 row of the band. The first arm is painted to its halt, then the second. Halts: a round's new dots in more than one
-clump (a branch: a junction, see below), no new dots (the band ends, or the paint has come round
-onto its own line), a new dot already painted by another line (a collision; an arm's halt only: the seed's ring goes on
-without those dots, agreed 2026-10-28, after 5072 of 5573 seeds died at a touch and held 20k dots no line walked). Finding
-halts too when the ring never splits within the round cap.
+clump (a branch: a junction, see below), no new dots (the band ends, or the paint has come round onto its own line), a
+row made entirely of another line's dots (that crease is walked). Finding halts too when the ring never splits within
+the round cap.
+
+Other lines' dots (agreed 2026-10-30, after thousands of stubs grew on dots a finished line had left beside its crease:
+a seed there read its direction and node from the leftovers alone, with the crease's own dots shut out, and resolved a
+crease that was not there). The paint spreads over another line's dots as over any other; they join the row and keep
+their owner. The join (rewritten 2026-10-31, afternoon): after the trim every dot of a row lies under one crest, so a row
+that still holds a dot of another line is that line's band at that spot; that line read the whole band there and placed its
+node, so the row's node is that line's nearest node, one dot of it being proof enough, and nothing is ever inserted. The arm goes on while a fresh dot remains in its rows and halts on a row that is entirely another line's. A
+seed whose ring is entirely another line's is on that crease: its node joins the line and the walk is done. The paint mark
+thus keeps its meaning, the crease a dot was found on, and two parallel creases a few cubes apart stay apart: their rows
+are their own.
 
 The node (agreed 2026-10-25 after the row centres gave a sawtooth: the dots' positions are grid points, their arrows
 carry the crease). For row k the region is rows k-window .. k+window of this arm, so the paint runs `window` rows ahead
@@ -130,6 +139,13 @@ others, it has no direction of its own; it is given one from the arrows of its r
 and each arm leaves the seed with it as its heading, toward its clump, so its rows are trimmed from the first one (the
 clump itself with the seed node as the reference). Where a crossing crease lies inside the rings the read is blurred;
 the sureness says so.
+The seed's dip (agreed 2026-10-31, after L798 seeded on a weak bump beside line 396: the ring around the seed was the dip,
+the next ring rose into line 396, and that clump, handed to the arm as its first row, put the first node on line 396; the trim
+reads only the row, and the dip lay in the ring before it): at the split, before the seed node, every clump is read along
+the direction from the seed to it, with the same valley read the trim uses across, the seed as the reference. A seed that is
+a peak keeps a clump with no dip on its path and lets go of one beyond a dip; a seed in a dip goes with the nearest crest and
+lets go of the rest. The dots let go are unpainted again. One clump left is a plain line with one arm; none left halts the
+line at its seed node (a bump of its own).
 
 Leads (agreed 2026-10-25, last; measured only, nothing acts on it yet): across a crease, from the crest outward, strength
 only falls or holds; a rise after a fall is a second lead, a second crease in the same band (a split before the dots
@@ -182,10 +198,12 @@ def meeting_point(points, dirs):
 
 
 class Walk:
-    def __init__(self, dots, snap=None, log=None, cap=30, reach=1, window=3, gap=0.0, fork=20.0, kink=30.0, lead=0.0, swing=15.0):
+    def __init__(self, dots, snap=None, log=None, cap=30, reach=1, window=3, gap=0.0, fork=20.0, kink=30.0, lead=0.0, swing=15.0, seedshare=0.5):
         self.idx = dots['idx']; self.N = dots['N'].astype(np.float64); self.w = np.asarray(dots['turn'], np.float64); self.size = float(dots['size']); self.lo = np.asarray(dots['lo'], float)
         self.X = self.lo+(self.idx+0.5)*self.size; self.k = len(self.idx); self.reach = int(reach); self.window = int(window); self.nb = neighbours(self.idx, self.reach)
         self.owner = np.full(self.k, -1, np.int32); self.lines = []; self.snap = snap or (lambda p, n: p); self.log = log or (lambda s: None); self.cap = int(cap)
+        self._in = np.zeros(self.k, bool)   # the dots in the paint of the walk under way: its own (owner = its id) and the ones it reads from other lines (owner kept)
+        self.seedshare = float(seedshare)   # the seed rule only: a free dot whose neighbours' strength is over this share one line's is that line's dot, not a seed
         self.gap = float(gap); self.fork = float(fork); self.kink = float(kink); self.lead = float(lead); self.swing = float(swing); self._tree = None; self._sub = np.full(self.k, -1, np.int32)   # gap radius (mm); the dot tree for it, built when first needed; the half each dot was painted by during a split test
         self.cur = None   # the walk under way
         self.stop_at = None; self.paused = False   # a breakpoint: the dot the walk pauses at, the moment a read paints it (once per line); `paused` is set by that read and cleared by the next step
@@ -200,9 +218,15 @@ class Walk:
     def start(self, seed):
         """a new line from dot `seed`; refused when the dot is painted already"""
         if self.owner[seed] != -1: self.log(f'dot {seed} belongs to line {self.owner[seed]} already'); return False
-        tid = len(self.lines); self.owner[seed] = tid
+        nb = self.nb[seed]; nb = nb[nb >= 0]; ow = self.owner[nb]; other = ow != -1   # the seed's surroundings (agreed 2026-10-30): a dot whose neighbours' strength is mostly one line's is that line's dot, one more of its band, not a seed
+        if other.any():
+            j = int(np.bincount(ow[other], weights=self.w[nb][other]).argmax()); share = float(self.w[nb][ow == j].sum()/max(self.w[nb].sum(), 1e-12))
+            if share > self.seedshare:
+                self.owner[seed] = j; self.absorbed = getattr(self, 'absorbed', 0)+1
+                self.log(f'dot {seed} (strength {self.w[seed]:.1f}): {share:.0%} of its neighbours\' strength is line {j}\'s, so it is line {j}\'s dot, not a seed'); return None
+        tid = len(self.lines); self.owner[seed] = tid; self._in[:] = False; self._in[seed] = True
         self.cur = dict(id=tid, seed=int(seed), stage='find', phase='spread', round=0, front=np.array([seed], int), prev=np.zeros(0, int), new=np.zeros(0, int), clumps=[], foreign=np.zeros(0, int),
-                        ring=[np.array([seed], int)], arms=[], arm=-1, queue=[], junctions=[], records=[], halt=None, seed_node=None, region=np.zeros(0, int), direction=None, sure=None, rownode=None, probe=None, gapped=0, member=None, share=None, broken=False, climb=None, second=None, misfit=None, dropped=[])
+                        ring=[np.array([seed], int)], arms=[], arm=-1, queue=[], junctions=[], records=[], halt=None, seed_node=None, region=np.zeros(0, int), direction=None, sure=None, rownode=None, probe=None, gapped=0, member=None, share=None, broken=False, climb=None, second=None, misfit=None, dropped=[], joins=[], seed_aside=np.zeros(0, int), seed_valley=np.zeros(0, int))
         self.log(f'--- line {tid}: seed dot {seed} at {self._fmt(self.X[seed])}, strength {self.w[seed]:.1f}')
         return True
 
@@ -221,7 +245,7 @@ class Walk:
         elif ph == 'clump': self._clump(); c['phase'] = 'node' if c['stage'] == 'find' or c['probe'] is not None else 'direction'
         elif ph == 'direction': self._direction(); c['phase'] = 'node'
         elif ph == 'node': self._node(); c['phase'] = 'spread'
-        if self.stop_at is not None and c.get('break_hit') != self.stop_at and self.owner[self.stop_at] == c['id']:
+        if self.stop_at is not None and c.get('break_hit') != self.stop_at and self._in[self.stop_at]:
             c['break_hit'] = self.stop_at; self.paused = True; self.log(f'*** stopped: dot {self.stop_at} was just painted by line {c["id"]} ({ph} read, round {c["round"]}, arm {c["arm"]})')
         return ph
 
@@ -257,22 +281,31 @@ class Walk:
         """unpainted dots within the gap radius of the front that lie ahead along the heading"""
         if self.gap <= 0: return np.zeros(0, int)
         cand = np.unique(np.concatenate([np.asarray(b, int) for b in self.tree.query_ball_point(self.X[front], self.gap)] or [np.zeros(0, int)]))
-        cand = cand[self.owner[cand] == -1]
+        cand = cand[~self._in[cand]]
         if len(cand) == 0: return cand
         centre = self.X[front].mean(0); ahead = (self.X[cand]-centre) @ heading > 0; return cand[ahead]
 
     def _paint_from(self, front, heading=None):
-        """the next row from a front: the unpainted dots next door that lie past the front in the direction of the walk (agreed
-        2026-10-27: a dot behind the front's strength-weighted centre along the heading is not grabbed, it stays free); at a dead
-        end the gap is sought ahead. Returns new, foreign, gapped"""
+        """the next row from a front: the dots next door not yet in this walk's paint that lie past the front in the direction of
+        the walk (agreed 2026-10-27: a dot behind the front's strength-weighted centre along the heading is not grabbed, it stays
+        free); at a dead end the gap is sought ahead. Dots of another line are read like any other (agreed 2026-10-30): they join
+        the row, keep their owner, and the node read from them decides (see _place). Returns new (the row), the row's dots owned
+        by another line, gapped"""
         c = self.cur; tid = c['id']; cand = self.nb[front]; cand = cand[cand >= 0]; cand = np.unique(cand)
-        foreign = cand[(self.owner[cand] != -1) & (self.owner[cand] != tid)]; new = cand[self.owner[cand] == -1]; gapped = False
+        new = cand[~self._in[cand]]; gapped = False
         if heading is not None and len(new):
             ahead = (self.X[new]-self._centre(front)) @ heading > 0
-            if not ahead.all(): self.log(f'  {int((~ahead).sum())} touching dot(s) behind the front left free'); new = new[ahead]
-        if len(new) == 0 and len(foreign) == 0 and heading is not None:
+            if not ahead.all(): self.log(f'  {int((~ahead).sum())} touching dot(s) behind the front left alone'); new = new[ahead]
+        if len(new) == 0 and heading is not None:
             new = self._gap_seek(front, heading); gapped = len(new) > 0
-        self.owner[new] = tid; return new, foreign, gapped
+        self._in[new] = True; free = new[self.owner[new] == -1]; self.owner[free] = tid
+        return new, new[(self.owner[new] != -1) & (self.owner[new] != tid)], gapped
+
+    def _owned_by(self, g):
+        """the dots of g owned by another line, and that line (the one owning the most strength), or -1"""
+        ow = self.owner[g]; other = (ow != -1) & (ow != self.cur['id'])
+        if not other.any(): return other, -1
+        return other, int(np.bincount(ow[other], weights=self.w[g][other]).argmax())
 
     def _spread(self):
         c = self.cur; c['clumps'] = []; c['region'] = np.zeros(0, int); c['direction'] = None; c['sure'] = None; c['member'] = None; c['climb'] = None; c['second'] = None
@@ -291,11 +324,11 @@ class Walk:
             return
         heading = self._heading(c['arms'][c['arm']], c['front']) if c['stage'] == 'advance' else None
         new, foreign, gapped = self._paint_from(c['front'], heading)
-        if c['stage'] == 'advance': new = self._trim(c['arms'][c['arm']], new, c['front'])
+        if c['stage'] == 'advance': new = self._trim(c['arms'][c['arm']], new, c['front']); foreign = foreign[np.isin(foreign, new)]   # the row as kept: dots the trim let go are nobody's business here
         c['new'] = new; c['foreign'] = foreign
         if gapped: c['gapped'] += 1
         c['records'].append(dict(round=c['round'], stage=c['stage'], arm=c['arm'], read='spread', front=len(c['front']), new=len(new), foreign=len(foreign), gapped=gapped))
-        self.log(f'round {c["round"]} spread ({c["stage"]}{"" if c["arm"] < 0 else " arm "+str(c["arm"])}): front {len(c["front"])} dots -> {len(new)} new' + (f' (dead end: found within {self.gap:g} mm ahead)' if gapped else '') + (f', {len(foreign)} touch another line' if len(foreign) else ''))
+        self.log(f'round {c["round"]} spread ({c["stage"]}{"" if c["arm"] < 0 else " arm "+str(c["arm"])}): front {len(c["front"])} dots -> {len(new)} new' + (f' (dead end: found within {self.gap:g} mm ahead)' if gapped else '') + (f', {len(foreign)} of them belong to line {self._owned_by(new)[1]}' if len(foreign) else ''))
 
     def _clump(self):
         c = self.cur; new = c['new']
@@ -326,7 +359,7 @@ class Walk:
             return i
         for i, sub in enumerate(subs):
             if sub['dead'] or len(sub['new']) == 0: continue
-            nbs = self.nb[sub['new']]; nbs = nbs[nbs >= 0]; nbs = nbs[self.owner[nbs] == c['id']]; others = np.unique(self._sub[nbs]); others = others[(others >= 0) & (others != i)]
+            nbs = self.nb[sub['new']]; nbs = nbs[nbs >= 0]; nbs = nbs[self._in[nbs]]; others = np.unique(self._sub[nbs]); others = others[(others >= 0) & (others != i)]
             for j in others: parent[find(int(j))] = find(i)
         groups = {}
         for i in range(len(subs)): groups.setdefault(find(i), []).append(i)
@@ -444,9 +477,17 @@ class Walk:
         mr, _ = self._membership(arm, row, t); wr = self.w[row]*mr; wr = wr/max(wr.sum(), 1e-12); cr = (self.X[row]*wr[:, None]).sum(0)
         arm['fit_sum'] += float((self.w[row]*(self.N[row] @ t)**2).sum()); arm['fit_w'] += float(self.w[row].sum())   # the band's scatter: every dot of the row, strength-weighted (weighing by membership shrank it on itself: 0.7 deg, a third of the band cut, a staircase)
         p = cg+((cr-cg) @ t)*t; q = self.snap(p, ng); mv = float(np.linalg.norm(q-p))
+        # the join (agreed 2026-10-31, afternoon; replaces the 2026-10-30 share-and-insert): after the trim every dot of the row lies
+        # under one crest, so a dot of another line still in it says our crest is that line's crease at this spot. That line read
+        # the whole band there and placed its node; our row sees part of the band and cannot do better. The row's node is that
+        # line's nearest node, one dot of it is proof enough, and nothing is ever inserted.
+        other, j = self._owned_by(row); osh = float(self.w[row][other].sum()/max(self.w[row].sum(), 1e-12)); joined = ''
+        if j >= 0:
+            q2, kind, dj = self._join(q, j)
+            if kind: c['joins'].append((q2.copy(), j, kind)); joined = f"; {int(other.sum())} dot(s) of the row are line {j}'s: the node is line {j}'s nearest, {dj*1000:.1f} um from the read node"; q = q2
         arm['nodes'].append(q); arm['misfits'].append(c['misfit']); arm['heading'] = t; arm['k'] = k+1; c['rownode'] = (cr, cg)
-        c['records'].append(dict(round=c['round'], stage='advance', arm=c['arm'], read='node', row=k, node=[float(v) for v in q], moved=mv, dots=len(row), region=len(g), sureness=c['sure']))
-        self.log(f'node {len(arm["nodes"])} of arm {c["arm"]} (row {k}, {len(row)} dots): {self._fmt(q)}; across from {len(g)} dots, along from the row, snap moved {mv*1000:.1f} um; own row off the stem by {rm:.0f} deg')
+        c['records'].append(dict(round=c['round'], stage='advance', arm=c['arm'], read='node', row=k, node=[float(v) for v in q], moved=mv, dots=len(row), region=len(g), sureness=c['sure'], owned=osh, join=(j if joined else -1)))
+        self.log(f'node {len(arm["nodes"])} of arm {c["arm"]} (row {k}, {len(row)} dots): {self._fmt(q)}; across from {len(g)} dots, along from the row, snap moved {mv*1000:.1f} um; own row off the stem by {rm:.0f} deg' + joined)
         if len(arm['nodes']) == 1 and arm['junction'] is not None: self._check_loose(arm); self._try_fix(arm['junction'])
 
     def _check_loose(self, arm):
@@ -465,30 +506,66 @@ class Walk:
         J['arms'].remove(arm['id']); arm['loose'] = True
         self.log(f'arm {arm["id"]}: its first segment ({L/self.size:.1f} cubes) is {text}, over {self.kink:g}: it follows no crease; cut loose from junction {J["id"]}, walked on as a line of its own ({len(J["arms"])} arm(s) left at the junction)')
 
+    def _join(self, q, j):
+        """the node q belongs to line j (a dot of its row is line j's): it is line j's node nearest to q. Returns (the node, 'merge',
+        distance moved), or (q, None, 0) when line j has no nodes (a seed that halted before any node: the phantom, open)."""
+        L = next((l for l in self.lines if l['id'] == j), None)
+        if L is None or not L.get('polylines'): return q, None, 0.0
+        best = None
+        for pi, pl in enumerate(L['polylines']):
+            d = np.linalg.norm(pl-q, axis=1); k = int(np.argmin(d))
+            if best is None or d[k] < best[0]: best = (float(d[k]), pi, k)
+        dn, pi, k = best; return L['polylines'][pi][k].copy(), 'merge', dn
+
+    def _all_owned(self, g):
+        """is every dot of g another line's"""
+        return len(g) > 0 and bool(self._owned_by(g)[0].all())
+
+    def _probe_absorb(self):
+        """the rows of a split under test, united round by round, become the arm's rows (the test is over)"""
+        c = self.cur; pr = c['probe']; arm = c['arms'][c['arm']]
+        n = max(len(sub['rows']) for sub in pr['subs']); rows = [np.concatenate([sub['rows'][q] for sub in pr['subs'] if q < len(sub['rows'])]) for q in range(n)]
+        c['probe'] = None; self._sub[self._sub >= 0] = -1
+        for r in rows: arm['rows'].append(r); c['prev'] = c['front']; c['front'] = r; c['round'] += 1
+        return rows
+
     def _node(self):
-        c = self.cur; cl = c['clumps']; n = len(cl)
-        if len(c['foreign']) and c['stage'] != 'find': self._arm_halt(f'collision with line {int(np.bincount(self.owner[c["foreign"]]).argmax())}'); return
+        c = self.cur; cl = c['clumps']; n = len(cl); tid = c['id']
         if c['stage'] == 'find':
-            if len(c['foreign']): self.log(f'  the ring touches line {int(np.bincount(self.owner[c["foreign"]]).argmax())} on one side and goes on without its dots (agreed 2026-10-28: the whole seed used to die here)')
+            if self._all_owned(c['new']):                                    # the ring is all another line's: the seed sits on its crease (agreed 2026-10-30)
+                c['ring'].append(c['new']); q, mv = self._seed_node(); j = self._owned_by(np.concatenate(c['ring']))[1]; q2, kind, dj = self._join(q, j)
+                if kind: c['joins'].append((q2.copy(), j, kind))
+                c['seed_node'] = q2; c['records'].append(dict(round=c['round'], stage='find', read='seed', node=[float(v) for v in q2], join=j, kind=kind))
+                self._halt(f'the ring is all line {j}\'s: the seed is on its crease, its node {kind or "lost"} into line {j}' + (f' ({dj*1000:.1f} um from the read node)' if kind else '')); return
+            if len(c['foreign']): self.log(f'  {len(c["foreign"])} ring dot(s) belong to line {self._owned_by(c["new"])[1]}: read with the rest')
             if n >= 2:
-                q, mv = self._seed_node(); c['seed_node'] = q; before = c['ring']
+                rings = np.concatenate(c['ring']); t, sure = crease_direction(self.N[rings], self.w[rings]); c['direction'] = t; c['sure'] = sure   # the seed's direction first (agreed 2026-10-31, afternoon): the sideways read needs it
+                self.log(f'seed direction from the arrows of {len(rings)} ring dots: {self._fmt(t)}, sureness {sure:.3f} (0 = a clean crease, 1 = none)')
+                cl = self._seed_cut(cl, t); n = len(cl)                         # the clumps sideways past a dip from the seed are let go
+                if n == 0:
+                    q, mv, nrow, j, joined = self._seed_row_node(t); c['seed_node'] = q; c['records'].append(dict(round=c['round'], stage='find', read='seed', node=[float(v) for v in q], row=nrow, join=j))
+                    self._halt('every clump lies beyond a dip from the seed: the seed is a bump of its own'); return
+                q, mv, nrow, j, joined = self._seed_row_node(t); c['seed_node'] = q; before = c['ring']
                 jid = None
                 if n > 2: jid = self._new_junction(q, None); self.log(f'node: {n} clumps at the seed: the seed is a junction')
                 # the seed's direction (agreed 2026-10-28): read from the arrows of the rings, as every node reads its own; each arm
                 # leaves the seed with it as its heading, pointed toward its clump, so its rows are trimmed from the first one
-                rings = np.concatenate(before); t, sure = crease_direction(self.N[rings], self.w[rings]); c['direction'] = t; c['sure'] = sure
-                self.log(f'seed direction from the arrows of {len(rings)} ring dots: {self._fmt(t)}, sureness {sure:.3f} (0 = a clean crease, 1 = none)')
                 for g in cl:
                     a = self._new_arm(g, q, before, jid); d = self._centre(g)-q; a['heading'] = t if d @ t >= 0 else -t
                     a['rows'][0] = self._trim(a, g, None, origin=q)
-                c['records'].append(dict(round=c['round'], stage='find', read='seed', node=[float(v) for v in q], direction=[float(v) for v in t], sureness=sure, rings=len(rings)))
+                c['records'].append(dict(round=c['round'], stage='find', read='seed', node=[float(v) for v in q], direction=[float(v) for v in t], sureness=sure, rings=len(rings), row=nrow, join=j))
                 c['stage'] = 'advance'; self._next_arm()
-                self.log(f'node: {"two clumps, the line found" if n == 2 else str(n)+" arms"}; seed node {self._fmt(q)} (snap moved {mv*1000:.1f} um); the paint runs {self.window} rows ahead of the nodes')
+                self.log(f'node: {"two clumps, the line found" if n == 2 else ("one clump left, the line found" if n == 1 else str(n)+" arms")}; first node {self._fmt(q)} from the row through the seed ({nrow} dots; across from {len(rings)} ring dots, snap moved {mv*1000:.1f} um){joined}; the paint runs {self.window} rows ahead of the nodes')
             elif n == 0: self._halt('no dots around the seed')
             else:
                 if c['round']+1 >= self.cap: self._halt(f'the ring never split within {self.cap} rounds')
                 else: c['ring'].append(c['new']); c['prev'] = c['front']; c['front'] = c['new']; c['round'] += 1; self.log('node: one ring, still spreading')
             return
+        if self._all_owned(c['new']):                                        # the row is all another line's: that crease is walked, the walk is done here (agreed 2026-10-30)
+            j = self._owned_by(c['new'])[1]
+            if c['probe'] is not None: self._probe_absorb()
+            else: arm = c['arms'][c['arm']]; arm['rows'].append(c['new']); c['prev'] = c['front']; c['front'] = c['new']; c['round'] += 1
+            self._arm_halt(f'every dot of the row belongs to line {j}: that crease is walked'); return
         if c['probe'] is not None: self._probe_decide(); return
         arm = c['arms'][c['arm']]
         if n == 1:
@@ -510,31 +587,21 @@ class Walk:
 
     def _trim(self, arm, row, prev, origin=None):
         """a freshly painted row keeps only the dots up to the valley (agreed 2026-10-26, late): read across in bins one cube
-        wide (each bin its strongest dot, every dot at full strength), a valley is a run of bins lower than the runs on both
+        wide (each bin the sum of its dots' strengths, every dot at full strength), a valley is a run of bins lower than the runs on both
         sides, its rise past the valley over `lead` of the lower neighbouring crest. Our piece is the one holding the reference,
-        the strength-weighted centre of the row before (`prev`; the row before the arm, or its start, for the first row), the
-        valley bins with it. The dots past a valley cease to exist for this line: unpainted again, out of the row, the front,
+        the strongest trail dot touching the row (2026-10-30; before: the centre of the row before, which could sit in a dip), the
+        valley bins with it; a reference that still falls in a dip takes the nearest crest. The dots past a valley cease to exist for this line: unpainted again, out of the row, the front,
         the clumps and everything after. A dip that does not repeat costs nothing: the next round grows back over them by
         touch. Returns the trimmed row. No heading yet (an arm's first rows): the row stays whole."""
         t = arm['heading']; j = len(arm['rows'])
         if t is None or len(row) < 2: return row
-        if origin is None: origin = self._centre(prev) if prev is not None and len(prev) else (self._centre(arm['before'][-1]) if arm['before'] and len(arm['before'][-1]) else arm['start'])
-        a = self._across(row, t); sx = (self.X[row]-origin) @ a/self.size; b = np.rint(sx).astype(int); lo = b.min(); b -= lo
-        prof = np.zeros(b.max()+1); np.maximum.at(prof, b, self.w[row])
-        runs = []                                                             # (first bin, last bin, strength) of each run of equal bins
-        for i, v in enumerate(prof):
-            if runs and runs[-1][2] == v: runs[-1][1] = i
-            else: runs.append([i, i, float(v)])
-        valleys = []
-        for r in range(1, len(runs)-1):
-            if not (runs[r][2] < runs[r-1][2] and runs[r][2] < runs[r+1][2]): continue
-            left = max(x[2] for x in runs[:r]); right = max(x[2] for x in runs[r+1:]); v = runs[r][2]; rise = min(left, right)-v
-            if rise > self.lead*min(left, right): valleys.append((runs[r][0], runs[r][1], rise/max(min(left, right), 1e-12)))
-        b0 = int(np.clip(-lo, 0, len(prof)-1))                               # the bin the reference falls in
-        L = [v for v in valleys if v[1] < b0]; R = [v for v in valleys if v[0] > b0]
-        keep = np.ones(len(row), bool); vmask = np.zeros(len(row), bool); gone = {}
-        if L: v = L[-1]; keep &= b >= v[0]; vmask |= (b >= v[0]) & (b <= v[1]); gone[-1] = (int((b < v[0]).sum()), round(v[2], 2))
-        if R: v = R[0]; keep &= b <= v[1]; vmask |= (b >= v[0]) & (b <= v[1]); gone[1] = (int((b > v[1]).sum()), round(v[2], 2))
+        # the reference (agreed 2026-10-30): the strongest trail dot touching the row, a dot on a crest by nature; the centre of the
+        # row before, an average, could land in the dip between two crests (L403's seed node did, and its first row kept both bands)
+        nb = self.nb[row]; nb = nb[nb >= 0]; nb = np.unique(nb[self._in[nb] & ~np.isin(nb, row)])
+        if len(nb): origin = self.X[nb[np.argmax(self.w[nb])]]
+        elif origin is None: origin = self._centre(prev) if prev is not None and len(prev) else (self._centre(arm['before'][-1]) if arm['before'] and len(arm['before'][-1]) else arm['start'])
+        a = self._across(row, t); sx = (self.X[row]-origin) @ a/self.size
+        keep, vmask, gone, prof = self._dip_cut(row, sx)
         # the arrow swing (agreed 2026-10-28): the dots ordered by their distance from the heading line through the reference,
         # one side negative; read from one edge of the row to the other, the arrows' lean about the heading must keep turning
         # the same way (one crease is one swing); a lean that turns back by more than `swing` degrees is a second crease, and the
@@ -552,27 +619,108 @@ class Walk:
             if pos < 0: m = s < pos; gone[-2] = (int(m.sum()), round(float(size), 0)); keep &= ~m
             else: m = s > pos; gone[2] = (int(m.sum()), round(float(size), 0)); keep &= ~m
         if not gone or keep.all() or not keep.any(): return row
-        far = row[~keep]; self.owner[far] = -1; arm['aside'].append(far); arm['valleys'][j] = row[vmask]
+        far = row[~keep]; self.owner[far[self.owner[far] == self.cur['id']]] = -1; self._in[far] = False; arm['aside'].append(far); arm['valleys'][j] = row[vmask]   # own dots let go are free again; another line's keep their owner
         self.cur['records'].append(dict(round=self.cur['round'], stage='advance', arm=arm['id'], read='trim', row=j, kept=int(keep.sum()), gone={int(k): v for k, v in gone.items()}, profile=[int(v) for v in prof]))
         self.log(f'trim: row {j} of arm {arm["id"]} keeps {int(keep.sum())} of {len(row)} dots: ' + ', '.join((f'{n} past a valley on the {"right" if sd == 1 else "left"} (rise {rs:g} of the crest)' if abs(sd) == 1 else f'{n} past an arrow turn-back of {rs:g} deg on the {"right" if sd > 0 else "left"}') for sd, (n, rs) in gone.items()) + ' let go')
         return row[keep]
 
+    def _dip_cut(self, dots, s, radius=None):
+        """the valley read, along any axis: `s` the dots' coordinate in cubes along it, 0 at the reference. Bins (stripes) one cube
+        wide; a stripe reads the sum of its dots' strengths per cube of its length (agreed 2026-10-31, evening; before: its strongest
+        dot, which let one dot of one row set a whole stripe, so the waver along a crest read as a dip across, the "ripple": L368's
+        seed cut let go of L22's crest on 51, 43, 50, L279's of L18's on 52, 47, 54). A stripe of a row is one cube long, so a
+        row's stripe is its sum. The seed's patch is the disc the rings make, so a stripe at distance d across from the seed is a
+        chord of that disc, long through the seed and short at the rim, and its empty cubes count as nothing: `radius` is the
+        disc's radius in cubes and the stripe's length its chord there, never under one cube. A valley is a run of stripes lower
+        than the runs on both sides, its rise past the valley over `lead` of the lower neighbouring crest; a reference inside a
+        valley takes the nearest crest (2026-10-30); the dots past the nearest valley on either side go. Returns (keep mask,
+        valley mask, gone {-1: left, 1: right -> (count, rise)}, profile)."""
+        b = np.rint(s).astype(int); lo = b.min(); b -= lo
+        prof = np.zeros(b.max()+1); np.add.at(prof, b, self.w[dots])
+        if radius is not None:
+            d = np.arange(len(prof))+lo; prof /= np.maximum(2.0*np.sqrt(np.maximum(radius**2-d.astype(float)**2, 0.0)), 1.0)
+        runs = []                                                             # (first bin, last bin, strength) of each run of equal bins
+        for i, v in enumerate(prof):
+            if runs and runs[-1][2] == v: runs[-1][1] = i
+            else: runs.append([i, i, float(v)])
+        valleys = []
+        for r in range(1, len(runs)-1):
+            if not (runs[r][2] < runs[r-1][2] and runs[r][2] < runs[r+1][2]): continue
+            left = max(x[2] for x in runs[:r]); right = max(x[2] for x in runs[r+1:]); v = runs[r][2]; rise = min(left, right)-v
+            if rise > self.lead*min(left, right): valleys.append((runs[r][0], runs[r][1], rise/max(min(left, right), 1e-12)))
+        b0 = int(np.clip(-lo, 0, len(prof)-1))                               # the bin the reference falls in
+        inside = [v for v in valleys if v[0] <= b0 <= v[1]]
+        if inside:                                                            # the reference sits in a dip: a dip is a cut all the same, and the piece kept is the nearest crest's (agreed 2026-10-30)
+            v = inside[0]; cl, cr = v[0]-1, v[1]+1; b0 = cl if (b0-cl < cr-b0) or (b0-cl == cr-b0 and prof[cl] >= prof[cr]) else cr
+        L = [v for v in valleys if v[1] < b0]; R = [v for v in valleys if v[0] > b0]
+        keep = np.ones(len(dots), bool); vmask = np.zeros(len(dots), bool); gone = {}
+        if L: v = L[-1]; keep &= b >= v[0]; vmask |= (b >= v[0]) & (b <= v[1]); gone[-1] = (int((b < v[0]).sum()), round(v[2], 2))
+        if R: v = R[0]; keep &= b <= v[1]; vmask |= (b >= v[0]) & (b <= v[1]); gone[1] = (int((b > v[1]).sum()), round(v[2], 2))
+        return keep, vmask, gone, prof
+
+    def _seed_cut(self, clumps, t):
+        """the seed's clumps against the dip, read sideways (agreed 2026-10-31, afternoon; replaces the read along the path to each
+        clump, which cut on the strength wobbling along a crest: a seed is the strongest dot of its patch, so along the crease the
+        strength can only fall from it and any wobble after read as a rise). The goal of the cut: tell a clump that sits in another
+        crease from the two ends of our own crease or a branch of it. Along a crest the strength wobbles; across it a dip is a
+        second crest. So the painted dots (rings and clumps) are read once along the across axis of the seed's heading t, the seed
+        as the reference, the same valley read the trim does on a row. A clump ahead or behind sits at the seed's own across
+        position and is never cut; a clump to the side past a valley is another crease and is let go; one to the side with no
+        valley between is a crossing and stays. The dots let go cease to exist for this line, as in the trim; dots in the valley
+        itself stay painted (so the paint cannot grow back over it) but make no row. Returns the clumps that remain, trimmed; the
+        rings are trimmed in place."""
+        c = self.cur; seed = c['seed']; p0 = self.X[seed]; rings = np.concatenate(c['ring']); allp = np.concatenate([rings]+list(clumps))
+        n = (self.N[rings]*self.w[rings, None]).sum(0); n /= np.linalg.norm(n)+1e-12
+        a = np.cross(n, t); a /= np.linalg.norm(a)+1e-12
+        s = (self.X[allp]-p0) @ a/self.size; keep, vmask, gone, prof = self._dip_cut(allp, s, radius=len(c['ring']))   # the clumps are the ring beyond the last, so the disc's radius is the ring count
+        far = allp[~keep]; vals = allp[vmask]
+        c['records'].append(dict(round=c['round'], stage='find', read='seedcut', dots=len(allp), cut=len(far), gone={int(k): v for k, v in gone.items()}, profile=[int(v) for v in prof]))
+        self.log(f'seed cut: {len(allp)} painted dots read sideways to the heading, strength across {[int(v) for v in prof]} (the seed in bin {int(np.rint(-s.min()))}): ' + (', '.join(f'{k} dots past a valley on the {"right" if sd > 0 else "left"} (rise {rs:g} of the crest)' for sd, (k, rs) in gone.items()) + ' let go' if gone else 'no dip beside the seed'))
+        if len(far):
+            self.owner[far[self.owner[far] == c['id']]] = -1; self._in[far] = False
+            c['ring'] = [r[~np.isin(r, far)] for r in c['ring']]; c['seed_aside'] = np.union1d(c['seed_aside'], far); c['seed_valley'] = np.union1d(c['seed_valley'], vals)
+        kept = [g[~np.isin(g, far) & ~np.isin(g, vals)] for g in clumps]
+        for i, (g, k) in enumerate(zip(clumps, kept)):
+            if len(k) < len(g): self.log(f'  clump {i}: {len(g)} dots -> {len(k)} ({len(g)-len(k)} let go or in the valley)')
+        return [g for g in kept if len(g)]
+
     def bands(self, arms):
         """the trims of a line's arms, for the view: valley dots, and the dots let go that no line has taken since"""
-        val = [v for a in arms for v in a['valleys'].values() if len(v)]
-        aside = [g for a in arms for g in a['aside'] if len(g)]
+        val = [v for a in arms for v in a['valleys'].values() if len(v)]+([self.cur['seed_valley']] if self.cur is not None else [])
+        aside = [g for a in arms for g in a['aside'] if len(g)]+([self.cur['seed_aside']] if self.cur is not None else [])
         cat = lambda L: np.unique(np.concatenate(L)) if L else np.zeros(0, int)
         aside = cat(aside); aside = aside[self.owner[aside] == -1]
         return dict(valleys=cat(val), aside=aside)
 
+    def _seed_row_node(self, t):
+        """the line's first node (agreed 2026-10-31, evening): the row through the seed, read like every row. The rings are only the
+        way the dots are gathered until the heading t is known; once it is, they are paint on the band like any other, and the
+        slice of them one cube thick along t at the seed is a row: its node is the rings' centre across (as a row takes the window's)
+        and the row's centre along, onto the surface, and a dot of another line in that row makes it that line's nearest node, as
+        for any row. The seed dot is one dot of the row, weighed by its strength like its neighbours, with no standing of its own
+        (before: the strength-weighted centre of the rings, a patch centred on the seed; a seed on a leftover flank dot of a walked
+        band, L368 beside L22, put the node a cube and a half from that line's nodes and went on to take nothing but its nodes).
+        Returns (node, snap distance, row size, the line joined or -1, the log text of the join)."""
+        c = self.cur; g = np.concatenate(c['ring']); p0 = self.X[c['seed']]
+        row = g[np.abs((self.X[g]-p0) @ t) <= 0.5*self.size]
+        wg = self.w[g]/max(self.w[g].sum(), 1e-12); cg = (self.X[g]*wg[:, None]).sum(0); ng = (self.N[g]*wg[:, None]).sum(0); ng /= np.linalg.norm(ng)+1e-12
+        wr = self.w[row]/max(self.w[row].sum(), 1e-12); cr = (self.X[row]*wr[:, None]).sum(0)
+        p = cg+((cr-cg) @ t)*t; q = self.snap(p, ng); mv = float(np.linalg.norm(q-p)); joined = ''
+        other, j = self._owned_by(row)
+        if j >= 0:
+            q2, kind, dj = self._join(q, j)
+            if kind: c['joins'].append((q2.copy(), j, kind)); joined = f"; {int(other.sum())} dot(s) of the row are line {j}'s: the node is line {j}'s nearest, {dj*1000:.1f} um from the read node"; q = q2
+            else: j = -1
+        return q, mv, len(row), j, joined
+
     def _seed_node(self):
-        """the seed's node: the seed moved across onto the centre of its rings, pushed onto the surface"""
+        """the seed's node when no heading is known (a ring entirely another line's): the centre of the rings, pushed onto the surface"""
         g = np.concatenate(self.cur['ring']); w = self.w[g]/self.w[g].sum(); p = (self.X[g]*w[:, None]).sum(0); n = (self.N[g]*w[:, None]).sum(0); n /= np.linalg.norm(n)+1e-12
         q = self.snap(p, n); return q, float(np.linalg.norm(q-p))
 
     def _touches_own(self, c):
         """does the front touch dots of this line painted before the last two rounds (a loop), rather than nothing"""
-        nbs = self.nb[c['front']]; nbs = nbs[nbs >= 0]; mine = nbs[self.owner[nbs] == c['id']]
+        nbs = self.nb[c['front']]; nbs = nbs[nbs >= 0]; mine = nbs[self._in[nbs]]
         recent = set(c['front'].tolist()) | set(c['new'].tolist()) | set(c['prev'].tolist())
         return any(int(m) not in recent for m in mine) and len(c['arms'][c['arm']]['nodes']) > 2
 
@@ -589,10 +737,6 @@ class Walk:
             a = self._new_arm(rest, q, [], jid); self.log(f'anchor {jid} at {self._fmt(q)}: arm {a["id"]} re-aligns from it with the {len(rest)} rows painted ahead')
         if arm['junction'] is not None: self._try_fix(arm['junction'])
         c['probe'] = None; c['broken'] = True
-
-    def _halt_arm_or_line(self, why):
-        if self.cur['stage'] == 'find': self._halt(why)
-        else: self._arm_halt(why)
 
     def _new_arm(self, rows, start, before, junction):
         """an arm: its first row (or rows), the point it starts from, the rows before it (nearest last), the junction it leaves (or None)"""
@@ -663,7 +807,7 @@ class Walk:
 
     def _halt(self, why):
         c = self.cur; c['halt'] = why; self.log(f'line {c["id"]} halts in the finding stage: {why}')
-        self.lines.append(dict(id=c['id'], seed=c['seed'], nodes=np.zeros((0, 3)), polylines=[], misfits=[], names=[], junctions=[], halt=why, arms=[], records=c['records']))
+        self.lines.append(dict(id=c['id'], seed=c['seed'], nodes=np.zeros((0, 3)), polylines=[], misfits=[], names=[], junctions=[], halt=why, arms=[], records=c['records'], joins=list(c['joins']), bands=self.bands([])))
 
     def _layout(self):
         """the polylines as drawn: one per arm, from the point it starts at through its nodes; the two arms of a plain seed are one
@@ -691,28 +835,28 @@ class Walk:
     def _finish(self):
         c = self.cur; arms = c['arms']; pl = self.polylines(); nj = len(c['junctions'])
         c['halt'] = 'done: ' + '; '.join(f'arm {a["id"]} {a["halt"]}' for a in arms)
-        self.lines.append(dict(id=c['id'], seed=c['seed'], nodes=np.vstack(pl) if pl else np.zeros((0, 3)), polylines=pl, misfits=self.node_misfits(), names=self.node_names(), junctions=[(J['pos'], len(J['arms'])+(J['arm_in'] is not None), J['fixed']) for J in c['junctions']], halt=c['halt'], arms=[a['halt'] for a in arms], records=c['records'], bands=self.bands(arms)))
-        self.log(f'line {c["id"]} done: {len(arms)} arms, {sum(len(a["nodes"]) for a in arms)} nodes, {nj} junction(s); ' + '; '.join(f'arm {a["id"]} {a["halt"]}' for a in arms))
+        self.lines.append(dict(id=c['id'], seed=c['seed'], nodes=np.vstack(pl) if pl else np.zeros((0, 3)), polylines=pl, misfits=self.node_misfits(), names=self.node_names(), junctions=[(J['pos'], len(J['arms'])+(J['arm_in'] is not None), J['fixed']) for J in c['junctions']], halt=c['halt'], arms=[a['halt'] for a in arms], records=c['records'], bands=self.bands(arms), joins=list(c['joins'])))
+        self.log(f'line {c["id"]} done: {len(arms)} arms, {sum(len(a["nodes"]) for a in arms)} nodes, {nj} junction(s), {len(c["joins"])} join(s) into other lines; ' + '; '.join(f'arm {a["id"]} {a["halt"]}' for a in arms))
 
     def reset(self):
         """drop the walk under way; its dots are freed"""
         c = self.cur
         if c is None: return
         if c['halt'] is None or not any(l['id'] == c['id'] for l in self.lines): self.owner[self.owner == c['id']] = -1
-        self._sub[:] = -1; self.cur = None
+        self._sub[:] = -1; self._in[:] = False; self.cur = None
 
     def clear(self):
-        self.owner[:] = -1; self.lines = []; self.cur = None
+        self.owner[:] = -1; self._in[:] = False; self.lines = []; self.cur = None
 
     def state(self):
         """what is on screen: painted dots of the line under way, the front, the new dots by clump, the region and direction of the node being read, the polylines so far, the junctions"""
         c = self.cur
         if c is None: return None
-        mine = np.flatnonzero(self.owner == c['id']); newest = prev = None; pl = []; mf = []; nm = []
+        mine = np.flatnonzero(self.owner == c['id']); borrowed = np.flatnonzero(self._in & (self.owner != c['id'])); newest = prev = None; pl = []; mf = []; nm = []
         if c['stage'] == 'advance':
             pl = self.polylines(); mf = self.node_misfits(); nm = self.node_names(); a = c['arms'][c['arm']]
             if a['nodes']: newest = a['nodes'][-1]; prev = a['nodes'][-2] if len(a['nodes']) > 1 else a['start']
         bands = self.bands(c['arms'])
-        return dict(id=c['id'], seed=c['seed'], stage=c['stage'], bands=bands, phase=c['phase'], round=c['round'], arm=c['arm'], halt=c['halt'], painted=mine, front=c['front'], new=c['new'], clumps=c['clumps'],
+        return dict(id=c['id'], seed=c['seed'], stage=c['stage'], bands=bands, phase=c['phase'], round=c['round'], arm=c['arm'], halt=c['halt'], painted=mine, borrowed=borrowed, joins=list(c['joins']), front=c['front'], new=c['new'], clumps=c['clumps'],
                     region=c['region'], member=c['member'], direction=c['direction'], sure=c['sure'], share=c['share'], misfit=c.get('misfit'), climb=c['climb'], second=c['second'], climb_mean=(c['arms'][c['arm']]['climb_sum']/c['arms'][c['arm']]['climb_n'] if c['arm'] >= 0 and c['arms'][c['arm']]['climb_n'] else None), rownode=c['rownode'], polylines=pl, misfits=mf, names=nm, junctions=[(J['pos'], J['fixed']) for J in c['junctions']], newest=newest, prev=prev, queued=len(c['queue']),
                     probe=None if c['probe'] is None else dict(rounds=c['probe']['rounds'], halves=[np.concatenate(sub['rows']) for sub in c['probe']['subs']], live=[not sub['dead'] for sub in c['probe']['subs']]), gapped=c['gapped'])
